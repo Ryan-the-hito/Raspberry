@@ -17,7 +17,7 @@ from PyQt6.QtCore import Qt, QPropertyAnimation, QRect, pyqtSignal, QSize, QPoin
 from qframelesswindow import AcrylicWindow, FramelessWindow, TitleBar, StandardTitleBar
 import hashlib
 import sys
-from PIL import Image, ImageFilter
+from PIL import Image, ImageFilter, ImageQt
 from pathlib import Path
 import shutil
 import webbrowser
@@ -40,7 +40,7 @@ os.makedirs(ICON_CACHE_DIR, exist_ok=True)
 APP_PATHS_FILE = os.path.expanduser("~/.launchpad_app_paths.json")
 APP_ORDER_FILE = os.path.expanduser("~/.launchpad_app_order.json")
 MAIN_ORDER_FILE = os.path.expanduser("~/.launchpad_main_order.json")
-VERSION = "0.0.1"
+VERSION = "0.0.2"
 NAME = 'Raspberry'
 
 os.environ["QT_QUICK_BACKEND"] = "metal"
@@ -254,9 +254,6 @@ def load_icon_from_cache(app_path, app_name):
 
 
 def get_finder_icon(app_path):
-    """
-    获取 Finder 显示的 icon（支持自定义 icon）
-    """
     if sys.platform != "darwin":
         return QIcon()
     nsimage = NSWorkspace.sharedWorkspace().iconForFile_(app_path)
@@ -266,7 +263,12 @@ def get_finder_icon(app_path):
     if image_data is None:
         return QIcon()
     qimage = QImage.fromData(bytes(image_data))
-    return QIcon(QPixmap.fromImage(qimage))
+    pil_img = ImageQt.fromqimage(qimage).convert("RGBA")
+    # 修复 premultiplied alpha
+    r, g, b, a = pil_img.split()
+    pil_img = Image.merge("RGBA", (r, g, b, a))
+    qimage2 = ImageQt.toqimage(pil_img)
+    return QIcon(QPixmap.fromImage(qimage2))
 
 
 # def get_applications():  # 这个是 get 到路径下所有所有.app文件的写法
@@ -685,7 +687,13 @@ class CustomMessageBox(QWidget):
         label = QLabel(text)
         label.setWordWrap(True)
         label.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
-        label.setStyleSheet("font-size: 16px;")
+        #label.setStyleSheet("font-size: 16px;")
+        label.setStyleSheet("""
+                    font-size: 16px;
+                    background-color: rgba(255,255,255,0);
+                    border-radius: 8px;
+                    padding: 8px;
+                """)
         layout.addWidget(label, stretch=1)
 
         # 按钮
@@ -693,20 +701,21 @@ class CustomMessageBox(QWidget):
         btn_layout.addStretch()
         self.btns = []
         for i, btn_text in enumerate(buttons):
-            btn = QPushButton(btn_text)
-            btn.setFixedHeight(32)
-            btn.setStyleSheet("""
-                QPushButton {
-                    background: #F2F2F2;
-                    border-radius: 8px;
-                    border: 1px solid #E0E0E0;
-                    min-width: 80px;
-                    font-size: 15px;
-                }
-                QPushButton:hover {
-                    background: #E0E0E0;
-                }
-            """)
+            btn = WhiteButton(btn_text)
+            btn.setFixedWidth(150)
+            # btn.setFixedHeight(32)
+            # btn.setStyleSheet("""
+            #     QPushButton {
+            #         background: #F2F2F2;
+            #         border-radius: 8px;
+            #         border: 1px solid #E0E0E0;
+            #         min-width: 80px;
+            #         font-size: 15px;
+            #     }
+            #     QPushButton:hover {
+            #         background: #E0E0E0;
+            #     }
+            # """)
             btn.clicked.connect(lambda checked, idx=i: self._on_btn(idx))
             btn_layout.addWidget(btn)
             self.btns.append(btn)
@@ -749,6 +758,132 @@ class CustomMessageBox(QWidget):
         self.destroyed.connect(loop.quit)
         loop.exec()
         return self.result
+
+
+class RestartMessageBox(QWidget):
+    def __init__(self, text, parent=None, icon=None, buttons=("OK",), default=0):
+        super().__init__(parent)
+        self.radius = 16
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setFixedSize(400, 200)
+        self.result = None
+
+        # 拖动支持
+        self.drag_pos = None
+
+        # 关闭按钮
+        self.close_button = MacWindowButton("#FF605C", "x", self)
+        self.close_button.move(10, 10)
+        self.close_button.clicked.connect(self.close)
+
+        # 主内容
+        layout = QVBoxLayout()
+        layout.setContentsMargins(32, 40, 32, 32)
+        layout.setSpacing(16)
+
+        # 图标
+        if icon:
+            icon_label = QLabel()
+            icon_label.setPixmap(icon.pixmap(48, 48))
+            icon_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            layout.addWidget(icon_label)
+
+        # 文本
+        label = QLabel(text)
+        label.setWordWrap(True)
+        label.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+        # label.setStyleSheet("font-size: 16px;")
+        label.setStyleSheet("""
+            font-size: 16px;
+            background-color: rgba(255,255,255,0);
+            border-radius: 8px;
+            padding: 8px;
+        """)
+        layout.addWidget(label, stretch=1)
+
+        # 按钮
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        self.btns = []
+        for i, btn_text in enumerate(buttons):
+            btn = WhiteButton(btn_text)
+            btn.setFixedWidth(150)
+            # btn.setFixedHeight(32)
+            # btn.setStyleSheet("""
+            #     QPushButton {
+            #         background: #F2F2F2;
+            #         border-radius: 8px;
+            #         border: 1px solid #E0E0E0;
+            #         min-width: 80px;
+            #         font-size: 15px;
+            #     }
+            #     QPushButton:hover {
+            #         background: #E0E0E0;
+            #     }
+            # """)
+            btn.clicked.connect(lambda checked, idx=i: self._on_btn(idx))
+            btn_layout.addWidget(btn)
+            self.btns.append(btn)
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+
+        self.setLayout(layout)
+        self.btns[default].setFocus()
+
+    def _on_btn(self, idx):
+        if idx == 0:
+            time.sleep(3)
+            applescript = '''
+                if application "Raspberry" is running then
+                    try
+                        tell application "Raspberry"
+                            quit
+                            delay 1
+                            activate
+                        end tell
+                    on error number -128
+                        quit application "Raspberry"
+                        delay 1
+                        activate application "Raspberry"
+                    end try
+                end if
+                '''
+            subprocess.Popen(['osascript', '-e', applescript])
+        self.result = idx
+        self.accept()
+
+    def accept(self):
+        self.close()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect())
+        path = QPainterPath()
+        path.addRoundedRect(rect, self.radius, self.radius)
+        painter.setClipPath(path)
+        painter.fillPath(path, QColor(255, 255, 255, 245))
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.MouseButton.LeftButton and self.drag_pos is not None:
+            self.move(event.globalPosition().toPoint() - self.drag_pos)
+            event.accept()
+
+    def exec(self):
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self.show()
+        loop = QEventLoop()
+        self.destroyed.connect(loop.quit)
+        loop.exec()
+        return self.result
+
 
 class GlassEffectWidget(QWidget):
     def __init__(self, radius=36, bg_color=(255,255,255,20), highlight_color=(255,255,255,80), parent=None):
@@ -2643,25 +2778,11 @@ class LaunchpadWindow(QWidget):
         self.current_page = 0
         self.display_apps(self.filtered_apps, self.current_page)
         #QMessageBox.information(self, "完成", "图标缓存已清除，应用已刷新。")
-        msg = CustomMessageBox("Icon cache cleared, app refreshed. \nRaspberry will restart in 5 seconds.", parent=self, buttons=("OK",))
+        msg = RestartMessageBox("Icon cache cleared, app refreshed.\nRaspberry will restart.", parent=self,
+                               buttons=("OK", "Later"))
         msg.exec()
-        time.sleep(5)
-        applescript = '''
-            if application "Raspberry" is running then
-                try
-                    tell application "Raspberry"
-                        quit
-                        delay 1
-                        activate
-                    end tell
-                on error number -128
-                    quit application "Raspberry"
-                    delay 1
-                    activate application "Raspberry"
-                end try
-            end if
-            '''
-        subprocess.Popen(['osascript', '-e', applescript])
+        # if msg.exec() == 0:
+        #     QTimer.singleShot(0, self.restart_app)
 
     def show_main_window(self):
         if not self.isVisible():
@@ -4091,7 +4212,7 @@ if __name__ == "__main__":
     p = win.palette()
     p.setColor(win.backgroundRole(), QColor('#ECECEC'))
     win.setPalette(p)
-    win.show()
+    win.hide()
     app.setStyleSheet(style_sheet_ori)
 
     # if sys.platform == "darwin":

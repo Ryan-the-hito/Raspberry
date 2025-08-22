@@ -5,13 +5,14 @@
 # coding:utf-8
 
 import os
+import math
 import plistlib
 import subprocess
 import yaml
 import json
 import time
 from PyQt6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QGridLayout, QPushButton, QLineEdit, QMenu, QLabel, QHBoxLayout, QSizePolicy, QMenuBar, QMessageBox, QFileDialog, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QDialog, QTextEdit
+    QApplication, QWidget, QVBoxLayout, QGridLayout, QPushButton, QLineEdit, QMenu, QLabel, QHBoxLayout, QSizePolicy, QMenuBar, QMessageBox, QFileDialog, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QDialog, QTextEdit, QToolButton
 )
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QFont, QPalette, QColor, QGuiApplication, QPainterPath, QRegion, QMouseEvent, QTextOption, QFontMetrics, QLinearGradient, QPen, QBrush, QAction, QSurfaceFormat
 from PyQt6.QtCore import Qt, QPropertyAnimation, QRect, pyqtSignal, QSize, QPoint, QRectF, QTimer, QThread, QEasingCurve, QParallelAnimationGroup, QAbstractAnimation, QEvent, QPointF, QCoreApplication, QElapsedTimer, QEventLoop
@@ -41,7 +42,7 @@ os.makedirs(ICON_CACHE_DIR, exist_ok=True)
 APP_PATHS_FILE = os.path.expanduser("~/.launchpad_app_paths.json")
 APP_ORDER_FILE = os.path.expanduser("~/.launchpad_app_order.json")
 MAIN_ORDER_FILE = os.path.expanduser("~/.launchpad_main_order.json")
-VERSION = "0.0.2"
+VERSION = "0.0.3"
 NAME = 'Raspberry Pro'
 
 os.environ["QT_QUICK_BACKEND"] = "metal"
@@ -606,6 +607,209 @@ def multiline_elide_with_firstline(text, font, max_width, max_lines=2):
         lines.append(text[idx:end].rstrip())
         idx = end
     return '\n'.join(lines)
+
+
+class EmptyButton(QPushButton):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(135, 128)
+        self.setFlat(True)
+        self.setEnabled(False)
+        self.setStyleSheet("background: transparent; border: none;")
+
+
+class SearchLineEdit(QLineEdit):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._base_width = 500
+        self._expanded_width = int(self._base_width * 1.5)
+        self.setFixedWidth(self._base_width)
+        self._anim = QPropertyAnimation(self, b"minimumWidth")
+        self._anim.setDuration(250)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.setStyleSheet("""
+            QLineEdit {
+                border-radius: 18px;
+                padding-left: 20px;
+                font-size: 16px;
+                background: rgba(255,255,255,0.35);
+                height: 36px;
+            }
+            QLineEdit:focus {
+                border: 1.5px solid #0085FF;
+                background: rgba(255,255,255,0.35);
+            }
+        """)
+
+        # “X”按钮
+        self.clear_btn = QToolButton(self)
+        self.clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clear_btn.setStyleSheet("""
+                    QToolButton {
+                        border: none;
+                        background: transparent;
+                    }
+                """)
+        self.clear_btn.setIcon(self._make_x_icon())
+        self.clear_btn.setFixedSize(24, 24)
+        self.clear_btn.hide()
+        self.clear_btn.clicked.connect(self.clear)
+        self.textChanged.connect(self._update_clear_btn)
+
+    def _make_x_icon(self):
+        # 画一个圆形背景+“X”
+        pix = QPixmap(24, 24)
+        pix.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # 圆形底
+        painter.setBrush(QColor(220, 220, 220, 180))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(0, 0, 24, 24)
+        # “X”
+        pen = QPen(QColor(80, 80, 80), 2)
+        painter.setPen(pen)
+        painter.drawLine(7, 7, 17, 17)
+        painter.drawLine(17, 7, 7, 17)
+        painter.end()
+        return QIcon(pix)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_clear_btn_pos()
+
+    def _update_clear_btn_pos(self):
+        # 右侧内边距
+        margin = 8
+        x = self.width() - self.clear_btn.width() - margin
+        y = (self.height() - self.clear_btn.height()) // 2
+        self.clear_btn.move(x, y)
+
+    def _update_clear_btn(self):
+        # 只有聚焦且有内容时显示
+        if self.hasFocus() and self.text():
+            self.clear_btn.show()
+        else:
+            self.clear_btn.hide()
+
+    def focusInEvent(self, event):
+        self._anim.stop()
+        self._anim.setStartValue(self.width())
+        self._anim.setEndValue(self._expanded_width)
+        self._anim.start()
+        super().focusInEvent(event)
+        self._update_clear_btn()
+        self.update()
+
+    def focusOutEvent(self, event):
+        self._anim.stop()
+        self._anim.setStartValue(self.width())
+        self._anim.setEndValue(self._base_width)
+        self._anim.start()
+        super().focusOutEvent(event)
+        self._update_clear_btn()
+        self.update()
+
+    def setMinimumWidth(self, w):
+        self.setFixedWidth(w)
+        self._update_clear_btn()
+        self.update()
+
+    def minimumWidth(self):
+        return self.width()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        # 高光特效
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        rect = self.rect().adjusted(1, 1, 0, 0)
+        radius = rect.height() // 2
+
+        # 生成圆角矩形路径上的点
+        points = self.rounded_rect_points(rect, radius, num_points=240)
+        total = len(points)
+        # 左上高光
+        self.draw_highlight_with_fade(painter, points, int(0.02*total), int(0.22*total), fade_len=15, base_width=1, reverse=False)
+        # 右下高光
+        self.draw_highlight_with_fade(painter, points, int(0.55*total), int(0.87*total), fade_len=15, base_width=1, reverse=True)
+
+    @staticmethod
+    def rounded_rect_points(rect, radius, num_points=100):
+        points = []
+        for i in range(num_points//4):
+            angle = 180 + 90 * (i / (num_points//4))
+            x = rect.left() + radius + radius * math.cos(math.radians(angle))
+            y = rect.top() + radius + radius * math.sin(math.radians(angle))
+            points.append(QPointF(x, y))
+        for i in range(num_points//4):
+            angle = 270 + 90 * (i / (num_points//4))
+            x = rect.right() - radius + radius * math.cos(math.radians(angle))
+            y = rect.top() + radius + radius * math.sin(math.radians(angle))
+            points.append(QPointF(x, y))
+        for i in range(num_points//4):
+            angle = 0 + 90 * (i / (num_points//4))
+            x = rect.right() - radius + radius * math.cos(math.radians(angle))
+            y = rect.bottom() - radius + radius * math.sin(math.radians(angle))
+            points.append(QPointF(x, y))
+        for i in range(num_points//4):
+            angle = 90 + 90 * (i / (num_points//4))
+            x = rect.left() + radius + radius * math.cos(math.radians(angle))
+            y = rect.bottom() - radius + radius * math.sin(math.radians(angle))
+            points.append(QPointF(x, y))
+        return points
+
+    @staticmethod
+    def draw_highlight_with_fade(painter, points, start_idx, end_idx, fade_len=10, base_width=3, reverse=False):
+        if not reverse:
+            grad_main = QLinearGradient(points[start_idx], points[end_idx])
+            grad_main.setColorAt(0, QColor(255,255,255,0))
+            grad_main.setColorAt(1, QColor(255,255,255,255))
+            pen_main = QPen(QBrush(grad_main), base_width, cap=Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen_main)
+            path_main = QPainterPath()
+            path_main.moveTo(points[start_idx])
+            for pt in points[start_idx+1:end_idx]:
+                path_main.lineTo(pt)
+            painter.drawPath(path_main)
+
+            fade_start = end_idx
+            fade_end = min(end_idx + fade_len, len(points)-1)
+            grad_fade = QLinearGradient(points[fade_start], points[fade_end])
+            grad_fade.setColorAt(0, QColor(255,255,255,255))
+            grad_fade.setColorAt(1, QColor(255,255,255,0))
+            pen_fade = QPen(QBrush(grad_fade), base_width, cap=Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen_fade)
+            path_fade = QPainterPath()
+            path_fade.moveTo(points[fade_start])
+            for pt in points[fade_start+1:fade_end]:
+                path_fade.lineTo(pt)
+            painter.drawPath(path_fade)
+        else:
+            grad_main = QLinearGradient(points[end_idx], points[start_idx])
+            grad_main.setColorAt(0, QColor(255,255,255,0))
+            grad_main.setColorAt(1, QColor(255,255,255,255))
+            pen_main = QPen(QBrush(grad_main), base_width, cap=Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen_main)
+            path_main = QPainterPath()
+            path_main.moveTo(points[end_idx])
+            for pt in reversed(points[start_idx+1:end_idx+1]):
+                path_main.lineTo(pt)
+            painter.drawPath(path_main)
+
+            fade_start = start_idx
+            fade_end = max(start_idx - fade_len, 0)
+            grad_fade = QLinearGradient(points[fade_start], points[fade_end])
+            grad_fade.setColorAt(0, QColor(255,255,255,255))
+            grad_fade.setColorAt(1, QColor(255,255,255,0))
+            pen_fade = QPen(QBrush(grad_fade), base_width, cap=Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen_fade)
+            path_fade = QPainterPath()
+            path_fade.moveTo(points[fade_start])
+            for pt in reversed(points[fade_end:fade_start]):
+                path_fade.lineTo(pt)
+            painter.drawPath(path_fade)
 
 
 class WhiteButton(QPushButton):
@@ -1272,42 +1476,87 @@ class AppButton(QPushButton):
 
     def show_context_menu(self, pos):
         menu = QMenu(self)
-        menu.setStyleSheet('''
+        light_menu_style = '''
         QMenu {
-        background-color: #FFFFFF;
-        border: 1px solid #CCCCCC;
-        border-radius: 12px;
-        padding: 4px;
-    }
-    QMenu::item {
-        padding: 8px 32px 8px 24px;
-        min-height: 15px;
-        border-radius: 6px;
-    }
-    QMenu::item:selected {
-        background-color: #0085FF;
-        color: #FFFFFF;
-    }
-    ''')
+            background-color: #FFFFFF;
+            color: #222222;
+            border: 1px solid #CCCCCC;
+            border-radius: 12px;
+            padding: 4px;
+        }
+        QMenu::item {
+            padding: 8px 32px 8px 24px;
+            min-height: 15px;
+            border-radius: 6px;
+        }
+        QMenu::item:selected {
+            background-color: #0085FF;
+            color: #FFFFFF;
+        }
+        '''
+
+        dark_menu_style = '''
+        QMenu {
+            background-color: #232323;
+            color: #EEEEEE;
+            border: 1px solid #444444;
+            border-radius: 12px;
+            padding: 4px;
+        }
+        QMenu::item {
+            padding: 8px 32px 8px 24px;
+            min-height: 15px;
+            border-radius: 6px;
+        }
+        QMenu::item:selected {
+            background-color: #0085FF;
+            color: #FFFFFF;
+        }
+        '''
+        if is_dark_theme(self):
+            menu.setStyleSheet(dark_menu_style)
+        else:
+            menu.setStyleSheet(light_menu_style)
+    #     menu.setStyleSheet('''
+    #     QMenu {
+    #     background-color: #FFFFFF;
+    #     border: 1px solid #CCCCCC;
+    #     border-radius: 12px;
+    #     padding: 4px;
+    # }
+    # QMenu::item {
+    #     padding: 8px 32px 8px 24px;
+    #     min-height: 15px;
+    #     border-radius: 6px;
+    # }
+    # QMenu::item:selected {
+    #     background-color: #0085FF;
+    #     color: #FFFFFF;
+    # }
+    # ''')
         if self.parent_group:
             move_menu = QMenu("Move to another group", self)
-            move_menu.setStyleSheet('''
-                QMenu {
-                background-color: #FFFFFF;
-                border: 1px solid #CCCCCC;
-                border-radius: 12px;
-                padding: 4px;
-            }
-            QMenu::item {
-                padding: 8px 32px 8px 24px;
-                min-height: 15px;
-                border-radius: 6px;
-            }
-            QMenu::item:selected {
-                background-color: #0085FF;
-                color: #FFFFFF;
-            }
-            ''')
+            if is_dark_theme(self):
+                move_menu.setStyleSheet(dark_menu_style)
+            else:
+                move_menu.setStyleSheet(light_menu_style)
+            # move_menu.setStyleSheet('''
+            #     QMenu {
+            #     background-color: #FFFFFF;
+            #     border: 1px solid #CCCCCC;
+            #     border-radius: 12px;
+            #     padding: 4px;
+            # }
+            # QMenu::item {
+            #     padding: 8px 32px 8px 24px;
+            #     min-height: 15px;
+            #     border-radius: 6px;
+            # }
+            # QMenu::item:selected {
+            #     background-color: #0085FF;
+            #     color: #FFFFFF;
+            # }
+            # ''')
             for group in self.main_window.groups:
                 if self.parent_group and group is self.parent_group:
                     continue
@@ -1319,23 +1568,27 @@ class AppButton(QPushButton):
             for group in self.main_window.groups:
                 group_menu.addAction(group['name'], lambda g=group: self.main_window.combine_app_to_group(self, g))
             group_menu.addAction("🆕 New group", lambda: self.main_window.combine_app_to_group(self, None))
-            group_menu.setStyleSheet('''
-                    QMenu {
-                    background-color: #FFFFFF;
-                    border: 1px solid #CCCCCC;
-                    border-radius: 12px;
-                    padding: 4px;
-                }
-                QMenu::item {
-                    padding: 8px 32px 8px 24px;
-                    min-height: 15px;
-                    border-radius: 6px;
-                }
-                QMenu::item:selected {
-                    background-color: #0085FF;
-                    color: #FFFFFF;
-                }
-                ''')
+            if is_dark_theme(self):
+                group_menu.setStyleSheet(dark_menu_style)
+            else:
+                group_menu.setStyleSheet(light_menu_style)
+            # group_menu.setStyleSheet('''
+            #         QMenu {
+            #         background-color: #FFFFFF;
+            #         border: 1px solid #CCCCCC;
+            #         border-radius: 12px;
+            #         padding: 4px;
+            #     }
+            #     QMenu::item {
+            #         padding: 8px 32px 8px 24px;
+            #         min-height: 15px;
+            #         border-radius: 6px;
+            #     }
+            #     QMenu::item:selected {
+            #         background-color: #0085FF;
+            #         color: #FFFFFF;
+            #     }
+            #     ''')
             menu.addMenu(group_menu)
         menu.addAction("Move to the trash can", self.move_to_trash)
         menu.exec(self.mapToGlobal(pos))
@@ -1400,23 +1653,64 @@ class GroupButton(QPushButton):
 
     def show_context_menu(self, pos):
         menu = QMenu(self)
-        menu.setStyleSheet('''
+        light_menu_style = '''
         QMenu {
-        background-color: #FFFFFF;
-        border: 1px solid #CCCCCC;
-        border-radius: 16px;
-        padding: 4px;
-    }
-    QMenu::item {
-        padding: 8px 32px 8px 24px;
-        min-height: 15px;
-        border-radius: 6px;
-    }
-    QMenu::item:selected {
-        background-color: #0085FF;
-        color: #FFFFFF;
-    }
-    ''')
+            background-color: #FFFFFF;
+            color: #222222;
+            border: 1px solid #CCCCCC;
+            border-radius: 12px;
+            padding: 4px;
+        }
+        QMenu::item {
+            padding: 8px 32px 8px 24px;
+            min-height: 15px;
+            border-radius: 6px;
+        }
+        QMenu::item:selected {
+            background-color: #0085FF;
+            color: #FFFFFF;
+        }
+        '''
+
+        dark_menu_style = '''
+        QMenu {
+            background-color: #232323;
+            color: #EEEEEE;
+            border: 1px solid #444444;
+            border-radius: 12px;
+            padding: 4px;
+        }
+        QMenu::item {
+            padding: 8px 32px 8px 24px;
+            min-height: 15px;
+            border-radius: 6px;
+        }
+        QMenu::item:selected {
+            background-color: #0085FF;
+            color: #FFFFFF;
+        }
+        '''
+        if is_dark_theme(self):
+            menu.setStyleSheet(dark_menu_style)
+        else:
+            menu.setStyleSheet(light_menu_style)
+    #     menu.setStyleSheet('''
+    #     QMenu {
+    #     background-color: #FFFFFF;
+    #     border: 1px solid #CCCCCC;
+    #     border-radius: 16px;
+    #     padding: 4px;
+    # }
+    # QMenu::item {
+    #     padding: 8px 32px 8px 24px;
+    #     min-height: 15px;
+    #     border-radius: 6px;
+    # }
+    # QMenu::item:selected {
+    #     background-color: #0085FF;
+    #     color: #FFFFFF;
+    # }
+    # ''')
         menu.addAction("Rename", self.rename_group)
         menu.addAction("Dissolve this group", self.disband_group)
         menu.exec(self.mapToGlobal(pos))
@@ -1428,21 +1722,296 @@ class GroupButton(QPushButton):
         if self.main_window:
             self.main_window.disband_group(self.group)
 
-def create_group_icon(apps):
-    size = 80 * 3
+# def create_group_icon(apps):
+#     size = 140
+#     radius = 28
+#     icon_size = 30
+#     spacing = 6
+#     grid = 3
+#
+#     # 1. 先画玻璃背景到 QImage
+#     bg_img = QImage(size, size, QImage.Format.Format_ARGB32)
+#     bg_img.fill(Qt.GlobalColor.transparent)
+#     painter = QPainter(bg_img)
+#     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+#
+#     rect = QRectF(0, 0, size, size)
+#     path = QPainterPath()
+#     path.addRoundedRect(rect, radius, radius)
+#     painter.setClipPath(path)
+#     # 半透明白色
+#     painter.fillPath(path, QColor(255, 255, 255, 40))
+#     painter.end()
+#
+#     # 2. PIL高斯模糊
+#     from PIL import Image, ImageFilter
+#     pil_img = Image.fromqimage(bg_img)
+#     pil_img = pil_img.filter(ImageFilter.GaussianBlur(radius=2))
+#     bg_img_blur = QImage(pil_img.tobytes("raw", "RGBA"), pil_img.width, pil_img.height, QImage.Format.Format_ARGB32)
+#
+#     # 3. 再画到 QPixmap
+#     pixmap = QPixmap(size, size)
+#     pixmap.fill(Qt.GlobalColor.transparent)
+#     painter = QPainter(pixmap)
+#     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+#     painter.drawImage(0, 0, bg_img_blur)
+#
+#     # 4. 画高光（左上和右下）
+#     # 左上高光
+#     highlight_path = QPainterPath()
+#     highlight_path.moveTo(rect.left() + radius, rect.top())
+#     highlight_path.arcTo(rect.left(), rect.top(), 2*radius, 2*radius, 90, 90)
+#     grad = QLinearGradient(rect.left(), rect.top(), rect.left() + radius*2, rect.top() + radius*2)
+#     grad.setColorAt(0, QColor(255,255,255,120))
+#     grad.setColorAt(1, QColor(255,255,255,0))
+#     painter.setPen(QPen(QBrush(grad), 4))
+#     painter.drawPath(highlight_path)
+#
+#     # 右下高光
+#     highlight_path2 = QPainterPath()
+#     highlight_path2.moveTo(rect.right() - radius, rect.bottom())
+#     highlight_path2.arcTo(rect.right() - 2*radius, rect.bottom() - 2*radius, 2*radius, 2*radius, 270, 90)
+#     grad2 = QLinearGradient(rect.right(), rect.bottom(), rect.right() - radius*2, rect.bottom() - radius*2)
+#     grad2.setColorAt(0, QColor(255,255,255,100))
+#     grad2.setColorAt(1, QColor(255,255,255,0))
+#     painter.setPen(QPen(QBrush(grad2), 4))
+#     painter.drawPath(highlight_path2)
+#
+#     # 5. 画圆角边框
+#     # border_pen = QPen(QColor(200, 200, 200, 220), 3)
+#     # painter.setPen(border_pen)
+#     # painter.drawRoundedRect(rect.adjusted(1.5, 1.5, -1.5, -1.5), radius, radius)
+#
+#     # 6. 画3*3小icon（缩小并居中）
+#     n = min(9, len(apps))
+#     total_icons = min(n, 9)
+#     start_x = (size - (icon_size * grid + spacing * (grid - 1))) // 2
+#     start_y = (size - (icon_size * grid + spacing * (grid - 1))) // 2
+#     for i in range(total_icons):
+#         row, col = divmod(i, 3)
+#         icon = apps[i]['icon']
+#         icon_pix = icon.pixmap(icon_size, icon_size)
+#         x = start_x + col * (icon_size + spacing)
+#         y = start_y + row * (icon_size + spacing)
+#         painter.drawPixmap(x, y, icon_pix)
+#
+#     painter.end()
+#     return QIcon(pixmap)
+
+def rounded_rect_points(rect, radius, num_points=100):
+    """返回圆角矩形边框上的点列表，顺时针"""
+    points = []
+    # 四个角的圆弧，每个弧各占 num_points//4
+    for i in range(num_points//4):
+        # 左上
+        angle = 180 + 90 * (i / (num_points//4))
+        x = rect.left() + radius + radius * math.cos(math.radians(angle))
+        y = rect.top() + radius + radius * math.sin(math.radians(angle))
+        points.append(QPointF(x, y))
+    for i in range(num_points//4):
+        # 右上
+        angle = 270 + 90 * (i / (num_points//4))
+        x = rect.right() - radius + radius * math.cos(math.radians(angle))
+        y = rect.top() + radius + radius * math.sin(math.radians(angle))
+        points.append(QPointF(x, y))
+    for i in range(num_points//4):
+        # 右下
+        angle = 0 + 90 * (i / (num_points//4))
+        x = rect.right() - radius + radius * math.cos(math.radians(angle))
+        y = rect.bottom() - radius + radius * math.sin(math.radians(angle))
+        points.append(QPointF(x, y))
+    for i in range(num_points//4):
+        # 左下
+        angle = 90 + 90 * (i / (num_points//4))
+        x = rect.left() + radius + radius * math.cos(math.radians(angle))
+        y = rect.bottom() - radius + radius * math.sin(math.radians(angle))
+        points.append(QPointF(x, y))
+    return points
+
+# def draw_highlight_with_fade(painter, points, start_idx, end_idx, fade_len=10, base_width=4):
+#     # 主高光段
+#     grad_main = QLinearGradient(points[start_idx], points[end_idx])
+#     grad_main.setColorAt(0, QColor(255,255,255,0))  # 半透明白
+#     grad_main.setColorAt(1, QColor(255,255,255,255))  # 全白
+#     pen_main = QPen(QBrush(grad_main), base_width, cap=Qt.PenCapStyle.RoundCap)
+#     painter.setPen(pen_main)
+#     path_main = QPainterPath()
+#     path_main.moveTo(points[start_idx])
+#     for pt in points[start_idx+1:end_idx]:
+#         path_main.lineTo(pt)
+#     painter.drawPath(path_main)
+#
+#     # 收尾段
+#     fade_start = end_idx
+#     fade_end = min(end_idx + fade_len, len(points)-1)
+#     grad_fade = QLinearGradient(points[fade_start], points[fade_end])
+#     grad_fade.setColorAt(0, QColor(255,255,255,255))  # 全白
+#     grad_fade.setColorAt(1, QColor(255,255,255,0))    # 全透明
+#     pen_fade = QPen(QBrush(grad_fade), base_width, cap=Qt.PenCapStyle.RoundCap)
+#     painter.setPen(pen_fade)
+#     path_fade = QPainterPath()
+#     path_fade.moveTo(points[fade_start])
+#     for pt in points[fade_start+1:fade_end]:
+#         path_fade.lineTo(pt)
+#     painter.drawPath(path_fade)
+
+def draw_highlight_with_fade(painter, points, start_idx, end_idx, fade_len=10, base_width=4, reverse=False):
+    """
+    reverse: False=主段从start到end，fade在end后面
+             True=主段从end到start，fade在start前面
+    """
+    if not reverse:
+        # 主高光段：从半透明白到全白
+        grad_main = QLinearGradient(points[start_idx], points[end_idx])
+        grad_main.setColorAt(0, QColor(255,255,255,0))  # 半透明白
+        grad_main.setColorAt(1, QColor(255,255,255,255))  # 全白
+        pen_main = QPen(QBrush(grad_main), base_width, cap=Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen_main)
+        path_main = QPainterPath()
+        path_main.moveTo(points[start_idx])
+        for pt in points[start_idx+1:end_idx]:
+            path_main.lineTo(pt)
+        painter.drawPath(path_main)
+
+        # 收尾段：从全白到全透明
+        fade_start = end_idx
+        fade_end = min(end_idx + fade_len, len(points)-1)
+        grad_fade = QLinearGradient(points[fade_start], points[fade_end])
+        grad_fade.setColorAt(0, QColor(255,255,255,255))  # 全白
+        grad_fade.setColorAt(1, QColor(255,255,255,0))    # 全透明
+        pen_fade = QPen(QBrush(grad_fade), base_width, cap=Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen_fade)
+        path_fade = QPainterPath()
+        path_fade.moveTo(points[fade_start])
+        for pt in points[fade_start+1:fade_end]:
+            path_fade.lineTo(pt)
+        painter.drawPath(path_fade)
+    else:
+        # 主高光段：从半透明白到全白（反向）
+        grad_main = QLinearGradient(points[end_idx], points[start_idx])
+        grad_main.setColorAt(0, QColor(255,255,255,0))  # 半透明白
+        grad_main.setColorAt(1, QColor(255,255,255,255))  # 全白
+        pen_main = QPen(QBrush(grad_main), base_width, cap=Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen_main)
+        path_main = QPainterPath()
+        path_main.moveTo(points[end_idx])
+        for pt in reversed(points[start_idx+1:end_idx+1]):
+            path_main.lineTo(pt)
+        painter.drawPath(path_main)
+
+        # 收尾段：从全白到全透明（反向）
+        fade_start = start_idx
+        fade_end = max(start_idx - fade_len, 0)
+        grad_fade = QLinearGradient(points[fade_start], points[fade_end])
+        grad_fade.setColorAt(0, QColor(255,255,255,255))  # 全白
+        grad_fade.setColorAt(1, QColor(255,255,255,0))    # 全透明
+        pen_fade = QPen(QBrush(grad_fade), base_width, cap=Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen_fade)
+        path_fade = QPainterPath()
+        path_fade.moveTo(points[fade_start])
+        for pt in reversed(points[fade_end:fade_start]):
+            path_fade.lineTo(pt)
+        painter.drawPath(path_fade)
+
+def create_group_icon(apps,
+                     highlight1_start=0.02, highlight1_len=0.22,
+                     highlight2_start=0.55, highlight2_len=0.22):
+    size = 240
+    radius = 56
+    icon_size = 56
+    spacing = 8
+    grid = 3
+
+    # 1. 玻璃背景
+    bg_img = QImage(size, size, QImage.Format.Format_ARGB32)
+    bg_img.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(bg_img)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    rect = QRectF(0, 0, size, size)
+    path = QPainterPath()
+    path.addRoundedRect(rect, radius, radius)
+    painter.setClipPath(path)
+    painter.fillPath(path, QColor(255, 255, 255, 40))
+    painter.end()
+    from PIL import Image, ImageFilter
+    pil_img = Image.fromqimage(bg_img)
+    pil_img = pil_img.filter(ImageFilter.GaussianBlur(radius=2))
+    bg_img_blur = QImage(pil_img.tobytes("raw", "RGBA"), pil_img.width, pil_img.height, QImage.Format.Format_ARGB32)
+
+    # 2. 画到 QPixmap
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    painter.drawImage(0, 0, bg_img_blur)
+
+    # 3. 画圆角边框
+    # border_pen = QPen(QColor(200, 200, 200, 220), 3)
+    # painter.setPen(border_pen)
+    # painter.drawRoundedRect(rect.adjusted(1.5, 1.5, -1.5, -1.5), radius, radius)
+
+    # 4. 画高光（可自定义长度和位置）
+    points = rounded_rect_points(rect.adjusted(3, 3, -3, -3), radius-2, num_points=240)
+    total = len(points)
+
+    # 左上高光
+    draw_highlight_with_fade(painter, points, start_idx=2, end_idx=int(0.22 * total), fade_len=10, base_width=4,
+                             reverse=False)
+    # draw_highlight_with_fade(painter, points, start_idx, end_idx, fade_len=10, base_width=4, reverse=False)
+    # original:
+    # start_idx = int(highlight1_start * total)
+    # end_idx = int((highlight1_start + highlight1_len) * total)
+    # painter.save()
+    # grad = QLinearGradient(points[start_idx], points[end_idx])
+    # grad.setColorAt(0, QColor(255,255,255,160))
+    # grad.setColorAt(1, QColor(255,255,255,0))
+    # pen = QPen(QBrush(grad), 4, cap=Qt.PenCapStyle.RoundCap)
+    # painter.setPen(pen)
+    # highlight_path = QPainterPath()
+    # highlight_path.moveTo(points[start_idx])
+    # for pt in points[start_idx+1:end_idx]:
+    #     highlight_path.lineTo(pt)
+    # painter.drawPath(highlight_path)
+    # painter.restore()
+
+    # 右下高光
+
+    draw_highlight_with_fade(painter, points, start_idx=int(0.55 * total), end_idx=int(0.87 * total), fade_len=13,
+                             base_width=4, reverse=True)
+    # draw_highlight_with_fade(painter, points, start_idx2, end_idx2, fade_len=10, base_width=4, reverse=True)
+    # original:
+    # start_idx2 = int(highlight2_start * total)
+    # end_idx2 = int((highlight2_start + highlight2_len) * total)
+    # painter.save()
+    # grad2 = QLinearGradient(points[start_idx2], points[end_idx2])
+    # grad2.setColorAt(0, QColor(255,255,255,120))
+    # grad2.setColorAt(1, QColor(255,255,255,0))
+    # pen2 = QPen(QBrush(grad2), 4, cap=Qt.PenCapStyle.RoundCap)
+    # painter.setPen(pen2)
+    # highlight_path2 = QPainterPath()
+    # highlight_path2.moveTo(points[start_idx2])
+    # for pt in points[start_idx2+1:end_idx2]:
+    #     highlight_path2.lineTo(pt)
+    # painter.drawPath(highlight_path2)
+    # painter.restore()
+
+    # 5. 画3*3小icon（缩小并居中）
     n = min(9, len(apps))
-    for i in range(n):
+    total_icons = min(n, 9)
+    start_x = (size - (icon_size * grid + spacing * (grid - 1))) // 2
+    start_y = (size - (icon_size * grid + spacing * (grid - 1))) // 2
+    for i in range(total_icons):
         row, col = divmod(i, 3)
         icon = apps[i]['icon']
-        icon_pix = icon.pixmap(80, 80)
-        x = col * 80
-        y = row * 80
+        icon_pix = icon.pixmap(icon_size, icon_size)
+        x = start_x + col * (icon_size + spacing)
+        y = start_y + row * (icon_size + spacing)
         painter.drawPixmap(x, y, icon_pix)
+
     painter.end()
     return QIcon(pixmap)
+
 
 class GroupWidget(QWidget):
     closed = pyqtSignal()
@@ -1594,13 +2163,26 @@ class GroupWidget(QWidget):
         for i in range(total_pages):
             dot = QPushButton("●" if i == self.current_page else "○")
             dot.setFixedSize(dot_width, dot_width)
-            dot.setStyleSheet("border:none; font-size:18px; color: #666;")
+            if is_dark_theme(QApplication.instance()):
+                dot_color = "#CCCCCC"
+            else:
+                dot_color = "#666666"
+            dot.setStyleSheet(f"border:none; font-size:18px; color: {dot_color};")
+            # dot.setStyleSheet("border:none; font-size:18px; color: #666;")
             dot.clicked.connect(lambda checked, idx=i: self.goto_page(idx))
             self.page_indicator.addWidget(dot)
 
+    # def goto_page(self, page):
+    #     self.current_page = page
+    #     self.display_apps(self.group['apps'], self.current_page)
+    # gotoanimation
     def goto_page(self, page):
+        total_pages = max(1, (len(self.group['apps']) + self.items_per_page - 1) // self.items_per_page)
+        if page < 0 or page >= total_pages or page == self.current_page:
+            return
+        direction = "left" if page > self.current_page else "right"
+        self.animate_page_transition(page, direction)
         self.current_page = page
-        self.display_apps(self.group['apps'], self.current_page)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1902,6 +2484,43 @@ class GroupWidget(QWidget):
             self.focus_index = rel_idx
             self.setFocus()
 
+    def animate_page_transition(self, new_page, direction="left"):
+        grid = self.grid_widget
+        old_btns = [w for w in grid.findChildren(AppButton)]
+        if not old_btns:
+            self.display_apps(self.group['apps'], new_page)
+            return
+
+        screen_width = self.width()
+        speed = 6000
+        anim_group_out = QParallelAnimationGroup(self)
+        for btn in old_btns:
+            start_pos = btn.pos()
+            if direction == "left":
+                end_pos = QPoint(-btn.width(), start_pos.y())
+                distance = start_pos.x() + btn.width()
+            else:  # direction == "right"
+                end_pos = QPoint(screen_width + btn.width(), start_pos.y())
+                distance = screen_width - start_pos.x() + btn.width()
+            duration = int(distance / speed * 1000)
+            anim = QPropertyAnimation(btn, b"pos", self)
+            anim.setDuration(duration)
+            anim.setStartValue(start_pos)
+            anim.setEndValue(end_pos)
+            anim.setEasingCurve(QEasingCurve.Type.OutCurve)
+            anim_group_out.addAnimation(anim)
+
+        def cleanup_old_btns():
+            for btn in old_btns:
+                btn.hide()
+                btn.setParent(None)
+                btn.deleteLater()
+            self.display_apps(self.group['apps'], new_page)
+
+        anim_group_out.finished.connect(cleanup_old_btns)
+        anim_group_out.start()
+        self.anim = anim_group_out
+
 
 class Window(AcrylicWindow):
     def __init__(self, parent=None):
@@ -1944,23 +2563,23 @@ class MainContentWidget(QWidget):
         super().__init__(parent)
         self.setGeometry(parent.geometry())
         self.setAutoFillBackground(True)
-        self.search_bar = QLineEdit()
+        self.search_bar = SearchLineEdit()
         self.search_bar.setPlaceholderText("Search...")
         self.search_bar.setFixedWidth(500)
-        self.search_bar.setStyleSheet("""
-            QLineEdit {
-                border-radius: 18px;
-                border: 1px solid rgba(204, 204, 204, 0.5);  /* 你的主色调，未聚焦时 */
-                padding-left: 20px;          /* 给左侧icon留空间 */
-                font-size: 16px;
-                background: rgba(255,255,255,0.35); 
-                height: 36px;
-            }
-            QLineEdit:focus {
-                border: 1.5px solid #0085FF; /* 聚焦时高亮色，可自定义 */
-                background: rgba(255,255,255,0.35);
-            }
-        """)
+        # self.search_bar.setStyleSheet("""
+        #     QLineEdit {
+        #         border-radius: 18px;
+        #         border: 1px solid rgba(204, 204, 204, 0.5);  /* 你的主色调，未聚焦时 */
+        #         padding-left: 20px;          /* 给左侧icon留空间 */
+        #         font-size: 16px;
+        #         background: rgba(255,255,255,0.35);
+        #         height: 36px;
+        #     }
+        #     QLineEdit:focus {
+        #         border: 1.5px solid #0085FF; /* 聚焦时高亮色，可自定义 */
+        #         background: rgba(255,255,255,0.35);
+        #     }
+        # """)
 
         # 搜索icon
         search_layout = QHBoxLayout()
@@ -2214,6 +2833,16 @@ class LaunchpadWindow(QWidget):
             else:
                 btn = AppButton(obj, self.main_content.grid_widget, main_window=self)
             grid_layout.addWidget(btn, row, col)
+
+        # 补齐空白按钮
+        total = len(page_items)
+        for idx in range(total, 35):
+            row, col = divmod(idx, 7)
+            if row >= 5:
+                break
+            btn = EmptyButton(self.main_content.grid_widget)
+            grid_layout.addWidget(btn, row, col)
+
         # 指示器数量也要区分
         if is_searching:
             self.update_page_indicator(len(apps))
@@ -2233,13 +2862,36 @@ class LaunchpadWindow(QWidget):
         for i in range(total_pages):
             dot = QPushButton("●" if i == self.current_page else "○")
             dot.setFixedSize(24, 24)
-            dot.setStyleSheet("border:none; font-size:18px; color: #666;")
+            if is_dark_theme(QApplication.instance()):
+                dot_color = "#CCCCCC"
+            else:
+                dot_color = "#666666"
+            dot.setStyleSheet(f"border:none; font-size:18px; color: {dot_color};")
+            # dot.setStyleSheet("border:none; font-size:18px; color: #666;")
             dot.clicked.connect(lambda checked, idx=i: self.goto_page(idx))
             page_indicator.addWidget(dot)
 
+    # def goto_page(self, page):
+    #     self.current_page = page
+    #     self.display_apps(self.filtered_apps, self.current_page)
+    # goto animation
     def goto_page(self, page):
+        total_pages = self.total_pages()
+        if page < 0 or page >= total_pages or page == self.current_page:
+            return
+        direction = "left" if page > self.current_page else "right"
         self.current_page = page
-        self.display_apps(self.filtered_apps, self.current_page)
+        self.update_page_indicator(
+            len(self.main_order) if not self.main_content.search_bar.text().strip() else len(self.filtered_apps))
+        is_searching = bool(self.main_content.search_bar.text().strip())
+        if is_searching:  # remove animation when searching
+            # page_items = [('app', app) for app in
+            #               self.filtered_apps[page * self.items_per_page:(page + 1) * self.items_per_page]]
+            self.current_page = page
+            self.display_apps(self.filtered_apps, self.current_page)
+        else:
+            page_items = self.main_order[page * self.items_per_page:(page + 1) * self.items_per_page]
+            self.animate_page_transition(page_items, direction)
 
     def filter_apps(self, text):
         if not text.strip():
@@ -3335,6 +3987,56 @@ class LaunchpadWindow(QWidget):
         except Exception as e:
             msg = CustomMessageBox(f"Error running lporg:\n{e}", parent=self, buttons=("OK",))
             msg.exec()
+
+    def animate_page_transition(self, next_page_items, direction="left"):
+        grid_layout = self.main_content.grid_layout
+        old_btns = []
+        for i in range(grid_layout.count()):
+            btn = grid_layout.itemAt(i).widget()
+            if isinstance(btn, (AppButton, GroupButton)):
+                old_btns.append(btn)
+
+        if not next_page_items:
+            for btn in old_btns:
+                btn.hide()
+                btn.setParent(None)
+                btn.deleteLater()
+            return
+
+        # 动画：旧按钮平移消失，方向可选
+        screen_width = self.width()
+        speed = 6000
+        anim_group_out = QParallelAnimationGroup(self)
+        for btn in old_btns:
+            start_pos = btn.pos()
+            if direction == "left":
+                end_pos = QPoint(-btn.width(), start_pos.y())
+                distance = start_pos.x() + btn.width()
+            else:  # direction == "right"
+                end_pos = QPoint(screen_width + btn.width(), start_pos.y())
+                distance = screen_width - start_pos.x() + btn.width()
+            duration = int(distance / speed * 1000)
+            anim = QPropertyAnimation(btn, b"pos", self)
+            anim.setDuration(duration)
+            anim.setStartValue(start_pos)
+            anim.setEndValue(end_pos)
+            anim.setEasingCurve(QEasingCurve.Type.OutCurve)
+            anim_group_out.addAnimation(anim)
+
+        def cleanup_old_btns():
+            for btn in old_btns:
+                btn.hide()
+                btn.setParent(None)
+                btn.deleteLater()
+            # 动画结束后，直接显示新一页内容
+            self.display_apps(
+                [obj for typ, obj in next_page_items if typ == 'app'],
+                self.current_page
+            )
+
+        anim_group_out.finished.connect(cleanup_old_btns)
+        anim_group_out.start()
+        self.anim = anim_group_out
 
 
 class WindowAbout(QWidget):  # 增加说明页面(About)

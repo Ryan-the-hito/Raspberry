@@ -12,10 +12,11 @@ import subprocess
 import yaml
 import json
 import time
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QGridLayout, QPushButton, QLineEdit, QMenu, QLabel, QHBoxLayout, QSizePolicy, QMenuBar, QMessageBox, QFileDialog, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QDialog, QTextEdit, QToolButton
 )
-from PyQt6.QtGui import QIcon, QPixmap, QPainter, QFont, QPalette, QColor, QGuiApplication, QPainterPath, QRegion, QMouseEvent, QTextOption, QFontMetrics, QLinearGradient, QPen, QBrush, QAction, QSurfaceFormat
+from PyQt6.QtGui import QIcon, QPixmap, QPainter, QFont, QPalette, QColor, QGuiApplication, QPainterPath, QRegion, QMouseEvent, QTextOption, QFontMetrics, QLinearGradient, QPen, QBrush, QAction, QSurfaceFormat, QCursor
 from PyQt6.QtCore import Qt, QPropertyAnimation, QRect, pyqtSignal, QSize, QPoint, QRectF, QTimer, QThread, QEasingCurve, QParallelAnimationGroup, QAbstractAnimation, QEvent, QPointF, QCoreApplication, QElapsedTimer, QEventLoop
 from qframelesswindow import AcrylicWindow, FramelessWindow, TitleBar, StandardTitleBar
 import hashlib
@@ -43,7 +44,7 @@ os.makedirs(ICON_CACHE_DIR, exist_ok=True)
 APP_PATHS_FILE = os.path.expanduser("~/.launchpad_app_paths.json")
 APP_ORDER_FILE = os.path.expanduser("~/.launchpad_app_order.json")
 MAIN_ORDER_FILE = os.path.expanduser("~/.launchpad_main_order.json")
-VERSION = "0.0.4"
+VERSION = "0.0.5"
 NAME = 'Raspberry Pro'
 
 os.environ["QT_QUICK_BACKEND"] = "metal"
@@ -1244,7 +1245,7 @@ class ClearCacheWorker(QThread):
             shutil.rmtree(ICON_CACHE_DIR)
             os.makedirs(ICON_CACHE_DIR, exist_ok=True)
         except Exception as e:
-            error_msg = f"清除缓存失败: {e}"
+            error_msg = f"Clear cache failed: {e}"
             self.finished.emit(None, None, None, error_msg)
             return
         try:
@@ -1253,7 +1254,7 @@ class ClearCacheWorker(QThread):
             filtered_apps = [a for a in apps if not any(a in g['apps'] for g in groups)]
             self.finished.emit(apps, groups, filtered_apps, "")
         except Exception as e:
-            error_msg = f"刷新应用失败: {e}"
+            error_msg = f"Failed to refresh the application: {e}"
             self.finished.emit(None, None, None, error_msg)
 
 
@@ -3469,6 +3470,7 @@ class LaunchpadWindow(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self.adapt_to_screen()  # 每次 show 都刷新几何
         self.prepare_icons_for_animation()
         self.hide_dock()
         QTimer.singleShot(10, self.animate_icons_in)  # 动画延迟触发
@@ -3996,22 +3998,22 @@ class LaunchpadWindow(QWidget):
                     json.dump(result, f, ensure_ascii=False, indent=2)
                 self.reload_groups()
                 if output:
-                    dlg = RestartMessageBox("porg executed successfully.\nOutput:\n{output}.\nRaspberry will restart.", parent=self,
+                    dlg = RestartMessageBox("Executed successfully.\nOutput:\n{output}.\nRaspberry will restart.", parent=self,
                                            buttons=("OK", "Later"))
                     dlg.exec()
                     # if dlg.exec() == 0:  # 用户点了 Restart
                     #     QTimer.singleShot(0, self.restart_app)
                 else:
-                    dlg = RestartMessageBox("lporg executed successfully.\nRaspberry will restart.", parent=self,
+                    dlg = RestartMessageBox("Executed successfully.\nRaspberry will restart.", parent=self,
                                            buttons=("OK", "Later"))
                     dlg.exec()
                     # if dlg.exec() == 0:  # 用户点了 Restart
                     #     QTimer.singleShot(0, self.restart_app)
             else:
-                msg = CustomMessageBox(f"lporg execution failed.\nOutput:\n{output}", parent=self, buttons=("OK",))
+                msg = CustomMessageBox(f"Execution failed.\nOutput:\n{output}", parent=self, buttons=("OK",))
                 msg.exec()
         except Exception as e:
-            msg = CustomMessageBox(f"Error running lporg:\n{e}", parent=self, buttons=("OK",))
+            msg = CustomMessageBox(f"Error:\n{e}", parent=self, buttons=("OK",))
             msg.exec()
 
     def animate_page_transition(self, next_page_items, direction="left"):
@@ -4131,7 +4133,7 @@ class LaunchpadWindow(QWidget):
                     if icon_cache_dst.exists():
                         shutil.rmtree(icon_cache_dst)
                     shutil.copytree(icon_cache_src, icon_cache_dst, dirs_exist_ok=True)
-                dlg = RestartMessageBox("lporg executed successfully.\nRaspberry will restart.", parent=self,
+                dlg = RestartMessageBox("Executed successfully.\nRaspberry will restart.", parent=self,
                                         buttons=("OK", "Later"))
                 dlg.exec()
                 # 重新加载
@@ -4141,6 +4143,28 @@ class LaunchpadWindow(QWidget):
                 # self.filtered_apps = [a for a in self.apps if not any(a in g['apps'] for g in self.groups)]
                 # self.current_page = 0
                 # self.display_apps(self.filtered_apps, self.current_page)
+
+    def adapt_to_screen(self):
+        """每次显示或分辨率变化时调用，让窗口和所有子布局都重算尺寸"""
+        # 1️⃣ 选定目标屏幕
+        screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        geo: QRect = screen.geometry()
+
+        # 2️⃣ 如果尺寸真的变了才更新
+        if geo != self.geometry():
+            self.setGeometry(geo)
+
+            # 让主内容覆盖整个窗口
+            self.main_content.setGeometry(self.rect())
+
+            # 如果正在显示 group_widget，也需要重新居中
+            if self.group_widget and self.group_widget.isVisible():
+                gw = self.group_widget
+                gw.move((self.width() - gw.width()) // 2,
+                        (self.height() - gw.height()) // 2)
+
+            # 3️⃣ 重新排布图标（依赖 self.width()/height() 的那些计算）
+            self.display_apps(self.filtered_apps, self.current_page)
 
 
 class WindowAbout(QWidget):  # 增加说明页面(About)
@@ -4265,7 +4289,7 @@ class WindowAbout(QWidget):  # 增加说明页面(About)
         widg4.setLayout(blay4)
 
         widg5 = QWidget()
-        lbl3 = QLabel('感谢您的喜爱！', self)
+        lbl3 = QLabel('For more of my works, please visit the homepage🥰.', self)
         blay5 = QHBoxLayout()
         blay5.setContentsMargins(0, 0, 0, 0)
         blay5.addStretch()
@@ -4274,7 +4298,7 @@ class WindowAbout(QWidget):  # 增加说明页面(About)
         widg5.setLayout(blay5)
 
         widg6 = QWidget()
-        lbl4 = QLabel('Special thanks to ut.code(); of the University of Tokyo❤️', self)
+        lbl4 = QLabel('Special thanks to ut.code(); of the University of Tokyo❤️.', self)
         blay6 = QHBoxLayout()
         blay6.setContentsMargins(0, 0, 0, 0)
         blay6.addStretch()
@@ -4283,7 +4307,7 @@ class WindowAbout(QWidget):  # 增加说明页面(About)
         widg6.setLayout(blay6)
 
         widg7 = QWidget()
-        lbl5 = QLabel('This app is under the protection of  GPL-3.0 license', self)
+        lbl5 = QLabel('This app is under the protection of  GPL-3.0 license.', self)
         blay7 = QHBoxLayout()
         blay7.setContentsMargins(0, 0, 0, 0)
         blay7.addStretch()
@@ -5110,7 +5134,18 @@ style_sheet_ori = '''
 '''
 
 if __name__ == "__main__":
-    import sys
+    SINGLETON = "com.ryanthehito.raspberry.singleton"
+
+    def other_instance_running():
+        s = QLocalSocket()
+        s.connectToServer(SINGLETON)
+        ok = s.waitForConnected(100)
+        s.close()
+        return ok
+
+    if other_instance_running():
+        sys.exit(0)
+
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     apps = get_applications()
@@ -5123,6 +5158,16 @@ if __name__ == "__main__":
     win.setPalette(p)
     win.hide()
     app.setStyleSheet(style_sheet_ori)
+
+    def bring_main_window_to_front():
+        win.showNormal()  # 如果窗口被最小化
+        win.raise_()  # 提到最前
+        win.activateWindow()  # 获取焦点
+
+    _server = QLocalServer()
+    QLocalServer.removeServer(SINGLETON)
+    _server.listen(SINGLETON)
+    _server.newConnection.connect(lambda: bring_main_window_to_front())
 
     # if sys.platform == "darwin":
     #     listener = AppEventListener.alloc().initWithMainWindow_(win)
@@ -5140,4 +5185,5 @@ if __name__ == "__main__":
             return False
     dock_delegate = _DockClickDelegate.alloc().init()
     NSApp.setDelegate_(dock_delegate)
+    
     sys.exit(app.exec())

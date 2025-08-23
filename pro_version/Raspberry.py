@@ -6,6 +6,7 @@
 
 import os
 import math
+import datetime
 import plistlib
 import subprocess
 import yaml
@@ -42,7 +43,7 @@ os.makedirs(ICON_CACHE_DIR, exist_ok=True)
 APP_PATHS_FILE = os.path.expanduser("~/.launchpad_app_paths.json")
 APP_ORDER_FILE = os.path.expanduser("~/.launchpad_app_order.json")
 MAIN_ORDER_FILE = os.path.expanduser("~/.launchpad_main_order.json")
-VERSION = "0.0.3"
+VERSION = "0.0.4"
 NAME = 'Raspberry Pro'
 
 os.environ["QT_QUICK_BACKEND"] = "metal"
@@ -610,12 +611,20 @@ def multiline_elide_with_firstline(text, font, max_width, max_lines=2):
 
 
 class EmptyButton(QPushButton):
-    def __init__(self, parent=None):
+    def __init__(self, main_window=None, parent=None):
         super().__init__(parent)
+        self.main_window = main_window          # 保存主窗引用
         self.setFixedSize(135, 128)
         self.setFlat(True)
-        self.setEnabled(False)
+        self.setEnabled(True)                  # 必须能接收事件
+        # 和背景一致：完全透明
         self.setStyleSheet("background: transparent; border: none;")
+
+    def mouseDoubleClickEvent(self, event):
+        # 双击占位按钮 → 关闭主界面
+        if event.button() == Qt.MouseButton.LeftButton and self.main_window:
+            self.main_window.close_main_window()
+        # 不再向父级传播，直接吞掉即可
 
 
 class SearchLineEdit(QLineEdit):
@@ -927,7 +936,7 @@ class CustomMessageBox(QWidget):
         # 文本
         label = QLabel(text)
         label.setWordWrap(True)
-        label.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+        label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         # label.setStyleSheet("font-size: 16px;")
         label.setStyleSheet("""
             font-size: 16px;
@@ -980,7 +989,10 @@ class CustomMessageBox(QWidget):
         path = QPainterPath()
         path.addRoundedRect(rect, self.radius, self.radius)
         painter.setClipPath(path)
-        painter.fillPath(path, QColor(255, 255, 255, 245))
+        if is_dark_theme(self):
+            painter.fillPath(path, QColor(30, 30, 30, 245))
+        else:
+            painter.fillPath(path, QColor(255, 255, 255, 245))
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1034,7 +1046,7 @@ class RestartMessageBox(QWidget):
         # 文本
         label = QLabel(text)
         label.setWordWrap(True)
-        label.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+        label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         # label.setStyleSheet("font-size: 16px;")
         label.setStyleSheet("""
             font-size: 16px;
@@ -1105,7 +1117,10 @@ class RestartMessageBox(QWidget):
         path = QPainterPath()
         path.addRoundedRect(rect, self.radius, self.radius)
         painter.setClipPath(path)
-        painter.fillPath(path, QColor(255, 255, 255, 245))
+        if is_dark_theme(self):
+            painter.fillPath(path, QColor(30, 30, 30, 245))
+        else:
+            painter.fillPath(path, QColor(255, 255, 255, 245))
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -2732,10 +2747,21 @@ class LaunchpadWindow(QWidget):
         self.action8 = QAction("🔁 Click to restart")
         self.menu.addAction(self.action8)
         self.action8.triggered.connect(self.restart_app)
+
+        self.menu.addSeparator()
+
         # 新增菜单项：运行 lporg
         self.run_lporg_action = QAction("▶️ Back up Launchpad groups to Raspberry", self)
         self.menu.addAction(self.run_lporg_action)
         self.run_lporg_action.triggered.connect(self.run_lporg)
+        # 新增菜单项：备份 group
+        self.backup_groups_action = QAction("🗂️ Backup current groups", self)
+        self.menu.addAction(self.backup_groups_action)
+        self.backup_groups_action.triggered.connect(self.backup_groups)
+        # 新增菜单项：恢复备份
+        self.restore_backup_action = QAction("🔄 Restore backups", self)
+        self.menu.addAction(self.restore_backup_action)
+        self.restore_backup_action.triggered.connect(self.restore_backup)
 
         # 新增 About 菜单
         self.about_menu = self.menu_bar.addMenu("Info")
@@ -2840,7 +2866,7 @@ class LaunchpadWindow(QWidget):
             row, col = divmod(idx, 7)
             if row >= 5:
                 break
-            btn = EmptyButton(self.main_content.grid_widget)
+            btn = EmptyButton(main_window=self, parent=self.main_content.grid_widget)
             grid_layout.addWidget(btn, row, col)
 
         # 指示器数量也要区分
@@ -3064,7 +3090,7 @@ class LaunchpadWindow(QWidget):
 
     def rename_group(self, group):
         self.show_group_widget(group)
-        self.group_widget.edit_name(None)
+        self.anim.finished.connect(lambda: self.group_widget.edit_name(None))
 
     def refresh_groups(self):
         for group in self.groups:
@@ -4037,6 +4063,84 @@ class LaunchpadWindow(QWidget):
         anim_group_out.finished.connect(cleanup_old_btns)
         anim_group_out.start()
         self.anim = anim_group_out
+
+    def backup_groups(self):
+        # 备份目录
+        backup_base = Path.home() / "Library/Application Support/com.ryanthehito.raspberry/RaspberryAppPath/Backups"
+        backup_base.mkdir(parents=True, exist_ok=True)
+        # 时间戳文件夹
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_dir = backup_base / timestamp
+        backup_dir.mkdir(parents=True, exist_ok=True)
+
+        # 要备份的文件和文件夹
+        files = [
+            Path(GROUPS_FILE),
+            Path(APP_ORDER_FILE),
+            Path(APP_PATHS_FILE),
+            Path(MAIN_ORDER_FILE),
+        ]
+        icon_cache_src = Path(ICON_CACHE_DIR)
+        icon_cache_dst = backup_dir / ".launchpad_icon_cache"
+
+        # 复制文件
+        for f in files:
+            if f.exists():
+                shutil.copy2(f, backup_dir / f.name)
+        # 复制文件夹
+        if icon_cache_src.exists():
+            shutil.copytree(icon_cache_src, icon_cache_dst, dirs_exist_ok=True)
+
+        # 提示
+        msg = CustomMessageBox("Backup completed!", parent=self, buttons=("OK",))
+        msg.exec()
+
+    def restore_backup(self):
+        # 选择备份文件夹
+        backup_base = str(
+            Path.home() / "Library/Application Support/com.ryanthehito.raspberry/RaspberryAppPath/Backups")
+        dialog = QFileDialog(self)
+        dialog.setFileMode(QFileDialog.FileMode.Directory)
+        dialog.setDirectory(backup_base)
+        dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
+        dialog.setWindowTitle("Select a backup folder to restore")
+        if dialog.exec():
+            selected_dirs = dialog.selectedFiles()
+            if selected_dirs:
+                backup_dir = Path(selected_dirs[0])
+                # 检查文件
+                files = [
+                    ".launchpad_groups.json",
+                    ".launchpad_app_order.json",
+                    ".launchpad_app_paths.json",
+                    ".launchpad_main_order.json",
+                ]
+                icon_cache_src = backup_dir / ".launchpad_icon_cache"
+                missing = [f for f in files if not (backup_dir / f).exists()]
+                if missing:
+                    msg = CustomMessageBox(f"Missing files: {', '.join(missing)}", parent=self, buttons=("OK",))
+                    msg.exec()
+                    return
+                # 覆盖文件
+                for f in files:
+                    shutil.copy2(backup_dir / f, Path.home() / f"{f}")
+                # 覆盖 icon cache
+                icon_cache_dst = Path(ICON_CACHE_DIR)
+                if icon_cache_src.exists():
+                    # 先删除原有
+                    if icon_cache_dst.exists():
+                        shutil.rmtree(icon_cache_dst)
+                    shutil.copytree(icon_cache_src, icon_cache_dst, dirs_exist_ok=True)
+                dlg = RestartMessageBox("lporg executed successfully.\nRaspberry will restart.", parent=self,
+                                        buttons=("OK", "Later"))
+                dlg.exec()
+                # 重新加载
+                # print('idontthinkthiswork')
+                # self.apps = get_applications()
+                # self.groups = load_groups(self.apps)
+                # self.filtered_apps = [a for a in self.apps if not any(a in g['apps'] for g in self.groups)]
+                # self.current_page = 0
+                # self.display_apps(self.filtered_apps, self.current_page)
 
 
 class WindowAbout(QWidget):  # 增加说明页面(About)

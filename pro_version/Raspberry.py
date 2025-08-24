@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QGridLayout, QPushButton, QLineEdit, QMenu, QLabel, QHBoxLayout, QSizePolicy, QMenuBar, QMessageBox, QFileDialog, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QDialog, QTextEdit, QToolButton
 )
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QFont, QPalette, QColor, QGuiApplication, QPainterPath, QRegion, QMouseEvent, QTextOption, QFontMetrics, QLinearGradient, QPen, QBrush, QAction, QSurfaceFormat, QCursor
-from PyQt6.QtCore import Qt, QPropertyAnimation, QRect, pyqtSignal, QSize, QPoint, QRectF, QTimer, QThread, QEasingCurve, QParallelAnimationGroup, QAbstractAnimation, QEvent, QPointF, QCoreApplication, QElapsedTimer, QEventLoop
+from PyQt6.QtCore import Qt, QPropertyAnimation, QRect, pyqtSignal, QSize, QPoint, QRectF, QTimer, QThread, QEasingCurve, QParallelAnimationGroup, QAbstractAnimation, QEvent, QPointF, QCoreApplication, QElapsedTimer, QEventLoop, QTranslator, QLocale, QLibraryInfo
 from qframelesswindow import AcrylicWindow, FramelessWindow, TitleBar, StandardTitleBar
 import hashlib
 import sys
@@ -44,7 +44,7 @@ os.makedirs(ICON_CACHE_DIR, exist_ok=True)
 APP_PATHS_FILE = os.path.expanduser("~/.launchpad_app_paths.json")
 APP_ORDER_FILE = os.path.expanduser("~/.launchpad_app_order.json")
 MAIN_ORDER_FILE = os.path.expanduser("~/.launchpad_main_order.json")
-VERSION = "0.0.5"
+VERSION = "0.0.6"
 NAME = 'Raspberry Pro'
 
 os.environ["QT_QUICK_BACKEND"] = "metal"
@@ -192,6 +192,32 @@ for item in source_dir.iterdir():
     else:
         os.makedirs(os.path.dirname(target_item), exist_ok=True)  # 确保父目录存在
         shutil.copy2(item, target_item)
+
+
+def load_translation(app, lang: str = None):
+    """
+    lang: "system" -> 跟随系统；"en", "zh_CN", "ja_JP"…
+    """
+    if lang is None or lang == "system":
+        lang = QLocale.system().name()           # 例如 "zh_CN"
+
+    # 1) Qt 自带的翻译（对话框按钮等）
+    qt_trans = QTranslator(app)
+    qt_translations_path = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+    if qt_trans.load("qt_" + lang, qt_translations_path):
+        app.installTranslator(qt_trans)
+
+    # 2) 程序自己的翻译
+    app_trans = QTranslator(app)
+    search_paths = [
+        Path(BasePath) / "translations",                       # 打包资源
+        Path.home() / "Library/Application Support/com.ryanthehito.raspberry/Resources/i18n"
+    ]
+    for p in search_paths:
+        qm_file = p / f"{lang}.qm"
+        if qm_file.exists() and app_trans.load(str(qm_file)):
+            app.installTranslator(app_trans)
+            break
 
 
 def save_main_order(order):
@@ -1215,7 +1241,8 @@ class GlassButton(QPushButton):
         if self.on_double_click:
             self.on_double_click()
         else:
-            print("GlassButton was double-clicked!")
+            pass
+            #print("GlassButton was double-clicked!")
         super().mouseDoubleClickEvent(event)
 
 class GlassButtonWidget(QWidget):
@@ -1245,7 +1272,7 @@ class ClearCacheWorker(QThread):
             shutil.rmtree(ICON_CACHE_DIR)
             os.makedirs(ICON_CACHE_DIR, exist_ok=True)
         except Exception as e:
-            error_msg = f"Clear cache failed: {e}"
+            error_msg = self.tr(f"Clear cache failed: %n").replace('%n', str(e))
             self.finished.emit(None, None, None, error_msg)
             return
         try:
@@ -1254,7 +1281,7 @@ class ClearCacheWorker(QThread):
             filtered_apps = [a for a in apps if not any(a in g['apps'] for g in groups)]
             self.finished.emit(apps, groups, filtered_apps, "")
         except Exception as e:
-            error_msg = f"Failed to refresh the application: {e}"
+            error_msg = self.tr(f"Failed to refresh the application: %n").replace('%n', str(e))
             self.finished.emit(None, None, None, error_msg)
 
 
@@ -1551,7 +1578,7 @@ class AppButton(QPushButton):
     # }
     # ''')
         if self.parent_group:
-            move_menu = QMenu("Move to another group", self)
+            move_menu = QMenu(self.tr("Move to another group"), self)
             if is_dark_theme(self):
                 move_menu.setStyleSheet(dark_menu_style)
             else:
@@ -1578,12 +1605,12 @@ class AppButton(QPushButton):
                     continue
                 move_menu.addAction(group['name'], lambda g=group: self.main_window.move_app_to_group(self, g))
             menu.addMenu(move_menu)
-            menu.addAction("Put it back to the main interface", self.move_out_of_group)
+            menu.addAction(self.tr("Put it back to the main interface"), self.move_out_of_group)
         if not self.parent_group:
-            group_menu = QMenu("Combine into a group", self)
+            group_menu = QMenu(self.tr("Combine into a group"), self)
             for group in self.main_window.groups:
                 group_menu.addAction(group['name'], lambda g=group: self.main_window.combine_app_to_group(self, g))
-            group_menu.addAction("🆕 New group", lambda: self.main_window.combine_app_to_group(self, None))
+            group_menu.addAction(self.tr("🆕 New group"), lambda: self.main_window.combine_app_to_group(self, None))
             if is_dark_theme(self):
                 group_menu.setStyleSheet(dark_menu_style)
             else:
@@ -1606,7 +1633,7 @@ class AppButton(QPushButton):
             #     }
             #     ''')
             menu.addMenu(group_menu)
-        menu.addAction("Move to the trash can", self.move_to_trash)
+        menu.addAction(self.tr("Move to the trash can"), self.move_to_trash)
         menu.exec(self.mapToGlobal(pos))
 
     def move_out_of_group(self):
@@ -1727,8 +1754,8 @@ class GroupButton(QPushButton):
     #     color: #FFFFFF;
     # }
     # ''')
-        menu.addAction("Rename", self.rename_group)
-        menu.addAction("Dissolve this group", self.disband_group)
+        menu.addAction(self.tr("Rename"), self.rename_group)
+        menu.addAction(self.tr("Dissolve this group"), self.disband_group)
         menu.exec(self.mapToGlobal(pos))
 
     def rename_group(self):
@@ -2541,7 +2568,7 @@ class GroupWidget(QWidget):
 class Window(AcrylicWindow):
     def __init__(self, parent=None):
         super().__init__(parent=parent)
-        self.setWindowTitle("Acrylic Window")
+        #self.setWindowTitle("Acrylic Window")
         self.titleBar.raise_()
 
         # customize acrylic effect
@@ -2580,7 +2607,7 @@ class MainContentWidget(QWidget):
         self.setGeometry(parent.geometry())
         self.setAutoFillBackground(True)
         self.search_bar = SearchLineEdit()
-        self.search_bar.setPlaceholderText("Search...")
+        self.search_bar.setPlaceholderText(self.tr("Search..."))
         self.search_bar.setFixedWidth(500)
         # self.search_bar.setStyleSheet("""
         #     QLineEdit {
@@ -2703,36 +2730,36 @@ class LaunchpadWindow(QWidget):
         # 添加菜单栏
         self.menu_bar = QMenuBar(self)
         self.menu_bar.setGeometry(0, 0, 300, 24)  # 你可以根据需要调整宽度
-        self.menu = self.menu_bar.addMenu("Actions")
+        self.menu = self.menu_bar.addMenu(self.tr("Actions"))
         # 新增菜单项：显示主界面
-        self.show_main_action = QAction("⭕️ Display the main interface", self)
+        self.show_main_action = QAction(self.tr("⭕️ Display the main interface"), self)
         self.menu.addAction(self.show_main_action)
         self.show_main_action.triggered.connect(self.show_main_window)
         # 新增菜单项：关闭主界面
-        self.close_main_action = QAction("❌ Close the main interface", self)
+        self.close_main_action = QAction(self.tr("❌ Close the main interface"), self)
         self.menu.addAction(self.close_main_action)
         self.close_main_action.triggered.connect(self.close_main_window)
 
         self.menu.addSeparator()
 
         # 新增菜单项：更新指定App图标缓存
-        self.update_single_app_icon_action = QAction("❇️ Update the specified app icon cache", self)
+        self.update_single_app_icon_action = QAction(self.tr("❇️ Update the specified app icon cache"), self)
         self.menu.addAction(self.update_single_app_icon_action)
         self.update_single_app_icon_action.triggered.connect(self.update_single_app_icon)
         # 新增菜单项：清除所有图标缓存
-        self.clear_cache_action = QAction("🧹 Clear icon cache and refresh all apps", self)
+        self.clear_cache_action = QAction(self.tr("🧹 Clear icon cache and refresh all apps"), self)
         self.menu.addAction(self.clear_cache_action)
         self.clear_cache_action.triggered.connect(self.clear_icon_cache_and_refresh)
 
         self.menu.addSeparator()
 
         # 新增菜单项：始终隐藏dock
-        self.always_hide_dock_action = QAction("🌀 Always hide Dock", self)
+        self.always_hide_dock_action = QAction(self.tr("🌀 Always hide Dock"), self)
         self.menu.addAction(self.always_hide_dock_action)
         self.always_hide_dock_action.setCheckable(True)
         self.always_hide_dock_action.triggered.connect(self.always_hide_dock)
         # login
-        self.action10 = QAction("🛠️ Start on login")
+        self.action10 = QAction(self.tr("🛠️ Start on login"))
         self.action10.setCheckable(True)
         self.menu.addAction(self.action10)
         plist_filename = 'com.ryanthehito.raspberry.plist'
@@ -2745,42 +2772,53 @@ class LaunchpadWindow(QWidget):
             self.action10.setChecked(False)
         self.action10.triggered.connect(self.login_start)
         # restart
-        self.action8 = QAction("🔁 Click to restart")
+        self.action8 = QAction(self.tr("🔁 Click to restart"))
         self.menu.addAction(self.action8)
         self.action8.triggered.connect(self.restart_app)
 
         self.menu.addSeparator()
 
         # 新增菜单项：运行 lporg
-        self.run_lporg_action = QAction("▶️ Back up Launchpad groups to Raspberry", self)
+        self.run_lporg_action = QAction(self.tr("▶️ Back up Launchpad groups to Raspberry"), self)
         self.menu.addAction(self.run_lporg_action)
         self.run_lporg_action.triggered.connect(self.run_lporg)
         # 新增菜单项：备份 group
-        self.backup_groups_action = QAction("🗂️ Backup current groups", self)
+        self.backup_groups_action = QAction(self.tr("🗂️ Backup current groups"), self)
         self.menu.addAction(self.backup_groups_action)
         self.backup_groups_action.triggered.connect(self.backup_groups)
         # 新增菜单项：恢复备份
-        self.restore_backup_action = QAction("🔄 Restore backups", self)
+        self.restore_backup_action = QAction(self.tr("🔄 Restore backups"), self)
         self.menu.addAction(self.restore_backup_action)
         self.restore_backup_action.triggered.connect(self.restore_backup)
 
         # 新增 About 菜单
-        self.about_menu = self.menu_bar.addMenu("Info")
+        self.about_menu = self.menu_bar.addMenu(self.tr("Info"))
         # 示例：添加 About 菜单项
-        self.about_action = QAction("🆕 Check for Updates", self)
+        self.about_action = QAction(self.tr("🆕 Check for Updates"), self)
         self.win_update = WindowUpdate()
         self.about_action.triggered.connect(self.win_update.activate)
         self.about_menu.addAction(self.about_action)
 
-        self.help_action = QAction("ℹ️ About this app", self)
+        self.help_action = QAction(self.tr("ℹ️ About this app"), self)
         self.win_about = WindowAbout()
         self.help_action.triggered.connect(self.win_about.activate)
         self.about_menu.addAction(self.help_action)
 
-        self.website_action = QAction("🔤 Guide and Support", self)
+        self.website_action = QAction(self.tr("🔤 Guide and Support"), self)
         self.win_permission = PermissionInfoWidget()
         self.website_action.triggered.connect(self.win_permission.show_window)
         self.about_menu.addAction(self.website_action)
+
+        # Add Language Menu
+        self.lang_menu = self.menu_bar.addMenu(self.tr("Language"))
+
+        # ("ja_JP", "日本語")
+        for code, label in [("en", "English"),
+                            ("zh_CN", "简体中文")]:
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.triggered.connect(lambda _, c=code: self.change_language(c))
+            self.lang_menu.addAction(act)
 
         self.clear_cache_worker = None
 
@@ -3436,7 +3474,7 @@ class LaunchpadWindow(QWidget):
     def clear_icon_cache_and_refresh(self):
         if self.clear_cache_worker and self.clear_cache_worker.isRunning():
             #QMessageBox.information(self, "请稍候", "正在清除缓存和刷新应用，请勿重复操作。")
-            msg = CustomMessageBox("Clearing cache and refreshing the app, please do not repeat the operation.", parent=self, buttons=("OK",))
+            msg = CustomMessageBox(self.tr("Clearing cache and refreshing the app, please do not repeat the operation."), parent=self, buttons=(self.tr("OK"),))
             msg.exec()
             return
         self.clear_cache_action.setEnabled(False)
@@ -3448,7 +3486,7 @@ class LaunchpadWindow(QWidget):
         self.clear_cache_action.setEnabled(True)
         if error_msg:
             #QMessageBox.warning(self, "错误", error_msg)
-            msg = CustomMessageBox(error_msg, parent=self, buttons=("OK",))
+            msg = CustomMessageBox(error_msg, parent=self, buttons=(self.tr("OK"),))
             msg.exec()
             return
         self.apps = apps
@@ -3457,7 +3495,7 @@ class LaunchpadWindow(QWidget):
         self.current_page = 0
         self.display_apps(self.filtered_apps, self.current_page)
         #QMessageBox.information(self, "完成", "图标缓存已清除，应用已刷新。")
-        msg = RestartMessageBox("Icon cache cleared, app refreshed.\nRaspberry will restart.", parent=self, buttons=("OK", "Later"))
+        msg = RestartMessageBox(self.tr("Icon cache cleared, app refreshed.\nRaspberry will restart."), parent=self, buttons=(self.tr("OK"), self.tr("Later")))
         msg.exec()
         # if msg.exec() == 0:
         #     QTimer.singleShot(0, self.restart_app)
@@ -3513,7 +3551,7 @@ class LaunchpadWindow(QWidget):
                         name = plist.get('CFBundleDisplayName') or plist.get('CFBundleName') or os.path.basename(app_path)[:-4]
                     except Exception as e:
                         #QMessageBox.warning(self, "错误", f"解析 Info.plist 失败: {e}")
-                        msg = CustomMessageBox(f"Failed to parse Info.plist: {e}", parent=self, buttons=("OK",))
+                        msg = CustomMessageBox(self.tr(f"Failed to parse Info.plist: %n").replace('%n', str(e)), parent=self, buttons=(self.tr("OK"),))
                         msg.exec()
                         return
                 # 2. iOS 应用的 iTunesMetadata.plist
@@ -3524,7 +3562,7 @@ class LaunchpadWindow(QWidget):
                         name = plist.get('title') or plist.get('itemName') or os.path.basename(app_path)[:-4]
                     except Exception as e:
                         #QMessageBox.warning(self, "错误", f"解析 iTunesMetadata.plist 失败: {e}")
-                        msg = CustomMessageBox(f"Failed to parse iTunesMetadata.plist: {e}", parent=self, buttons=("OK",))
+                        msg = CustomMessageBox(self.tr(f"Failed to parse iTunesMetadata.plist: %n").replace('%n', str(e)), parent=self, buttons=(self.tr("OK"),))
                         msg.exec()
                         return
                 # 3. 都没有就用文件夹名
@@ -3540,7 +3578,7 @@ class LaunchpadWindow(QWidget):
                     save_icon_to_cache(icon, app_path, name)
                 else:
                     #QMessageBox.warning(self, "错误", "无法获取该App的图标。")
-                    msg = CustomMessageBox("Unable to retrieve the icon for this app.", parent=self, buttons=("OK",))
+                    msg = CustomMessageBox(self.tr("Unable to retrieve the icon for this app."), parent=self, buttons=(self.tr("OK"),))
                     msg.exec()
                     return
                 # 更新内存中的app信息
@@ -3558,11 +3596,11 @@ class LaunchpadWindow(QWidget):
                             group['icon'] = create_group_icon(group['apps'])
                 if updated:
                     self.display_apps(self.filtered_apps, self.current_page)
-                    msg = CustomMessageBox(f"The icon cache for {name} has been updated.", parent=self, buttons=("OK",))
+                    msg = CustomMessageBox(self.tr(f"The icon cache for %n has been updated.").replace('%n', name), parent=self, buttons=(self.tr("OK"),))
                     msg.exec()
                     #QMessageBox.information(self, "完成", f"{name} 的图标缓存已更新。")
                 else:
-                    msg = CustomMessageBox(f"The icon of {name} has been cached, but the app is not in the main interface list.", parent=self, buttons=("OK",))
+                    msg = CustomMessageBox(self.tr(f"The icon of %n has been cached, but the app is not in the main interface list.").replace('%n', name), parent=self, buttons=(self.tr("OK"),))
                     msg.exec()
                     #QMessageBox.information(self, "提示", f"已缓存 {name} 的图标，但该App不在主界面列表中。")
 
@@ -3974,13 +4012,13 @@ class LaunchpadWindow(QWidget):
         lporg_filename = 'lporg'
         lporg_path = BasePath + lporg_filename
         if not os.path.exists(lporg_path):
-            msg = CustomMessageBox(f"lporg not found at {lporg_path}", parent=self, buttons=("OK",))
+            msg = CustomMessageBox(self.tr(f"lporg not found at %n").replace('%n', lporg_path), parent=self, buttons=(self.tr("OK"),))
             msg.exec()
             return
         base_dir_str = str(Path.home()) + "/Library/Application\\\ Support/com.ryanthehito.raspberry/Resources/lporg"
         lporg_cmd = base_dir_str + ' save'
         applescript = f'do shell script "{lporg_cmd}"'
-        print(applescript)
+        #print(applescript)
         try:
             result = subprocess.run(
                 ["osascript", "-e", applescript],
@@ -3998,22 +4036,22 @@ class LaunchpadWindow(QWidget):
                     json.dump(result, f, ensure_ascii=False, indent=2)
                 self.reload_groups()
                 if output:
-                    dlg = RestartMessageBox("Executed successfully.\nOutput:\n{output}.\nRaspberry will restart.", parent=self,
-                                           buttons=("OK", "Later"))
+                    dlg = RestartMessageBox(self.tr(f"Executed successfully.\nOutput:\n%n.\nRaspberry will restart.").replace('%n', output), parent=self,
+                                           buttons=(self.tr("OK"), self.tr("Later")))
                     dlg.exec()
                     # if dlg.exec() == 0:  # 用户点了 Restart
                     #     QTimer.singleShot(0, self.restart_app)
                 else:
-                    dlg = RestartMessageBox("Executed successfully.\nRaspberry will restart.", parent=self,
-                                           buttons=("OK", "Later"))
+                    dlg = RestartMessageBox(self.tr("Executed successfully.\nRaspberry will restart."), parent=self,
+                                           buttons=(self.tr("OK"), self.tr("Later")))
                     dlg.exec()
                     # if dlg.exec() == 0:  # 用户点了 Restart
                     #     QTimer.singleShot(0, self.restart_app)
             else:
-                msg = CustomMessageBox(f"Execution failed.\nOutput:\n{output}", parent=self, buttons=("OK",))
+                msg = CustomMessageBox(self.tr(f"Execution failed.\nOutput:\n%n").replace('%n', output), parent=self, buttons=(self.tr("OK"),))
                 msg.exec()
         except Exception as e:
-            msg = CustomMessageBox(f"Error:\n{e}", parent=self, buttons=("OK",))
+            msg = CustomMessageBox(self.tr(f"Error:\n%n").replace('%n', str(e)), parent=self, buttons=(self.tr("OK"),))
             msg.exec()
 
     def animate_page_transition(self, next_page_items, direction="left"):
@@ -4094,7 +4132,7 @@ class LaunchpadWindow(QWidget):
             shutil.copytree(icon_cache_src, icon_cache_dst, dirs_exist_ok=True)
 
         # 提示
-        msg = CustomMessageBox("Backup completed!", parent=self, buttons=("OK",))
+        msg = CustomMessageBox(self.tr("Backup completed!"), parent=self, buttons=(self.tr("OK"),))
         msg.exec()
 
     def restore_backup(self):
@@ -4105,7 +4143,7 @@ class LaunchpadWindow(QWidget):
         dialog.setFileMode(QFileDialog.FileMode.Directory)
         dialog.setDirectory(backup_base)
         dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
-        dialog.setWindowTitle("Select a backup folder to restore")
+        dialog.setWindowTitle(self.tr("Select a backup folder to restore"))
         if dialog.exec():
             selected_dirs = dialog.selectedFiles()
             if selected_dirs:
@@ -4120,7 +4158,7 @@ class LaunchpadWindow(QWidget):
                 icon_cache_src = backup_dir / ".launchpad_icon_cache"
                 missing = [f for f in files if not (backup_dir / f).exists()]
                 if missing:
-                    msg = CustomMessageBox(f"Missing files: {', '.join(missing)}", parent=self, buttons=("OK",))
+                    msg = CustomMessageBox(self.tr(f"Missing files: %n").replace('%n', ', '.join(missing)), parent=self, buttons=(self.tr("OK"),))
                     msg.exec()
                     return
                 # 覆盖文件
@@ -4133,8 +4171,8 @@ class LaunchpadWindow(QWidget):
                     if icon_cache_dst.exists():
                         shutil.rmtree(icon_cache_dst)
                     shutil.copytree(icon_cache_src, icon_cache_dst, dirs_exist_ok=True)
-                dlg = RestartMessageBox("Executed successfully.\nRaspberry will restart.", parent=self,
-                                        buttons=("OK", "Later"))
+                dlg = RestartMessageBox(self.tr("Executed successfully.\nRaspberry will restart."), parent=self,
+                                        buttons=(self.tr("OK"), self.tr("Later")))
                 dlg.exec()
                 # 重新加载
                 # print('idontthinkthiswork')
@@ -4165,6 +4203,15 @@ class LaunchpadWindow(QWidget):
 
             # 3️⃣ 重新排布图标（依赖 self.width()/height() 的那些计算）
             self.display_apps(self.filtered_apps, self.current_page)
+
+    def change_language(self, code):
+        # 1) 记录到配置
+        cfg_file = Path.home() / ".raspberry_lang"
+        cfg_file.write_text(code, encoding="utf-8")
+        # 2) 提示用户重启
+        msg = RestartMessageBox(self.tr("Language will apply after restart."),
+                               parent=self, buttons=(self.tr("OK"),))
+        msg.exec()
 
 
 class WindowAbout(QWidget):  # 增加说明页面(About)
@@ -4271,7 +4318,7 @@ class WindowAbout(QWidget):  # 增加说明页面(About)
         widg2.setLayout(blay2)
 
         widg3 = QWidget()
-        lbl1 = QLabel(f'Version {VERSION}', self)
+        lbl1 = QLabel(self.tr(f'Version %n').replace('%n', VERSION), self)
         blay3 = QHBoxLayout()
         blay3.setContentsMargins(0, 0, 0, 0)
         blay3.addStretch()
@@ -4280,7 +4327,7 @@ class WindowAbout(QWidget):  # 增加说明页面(About)
         widg3.setLayout(blay3)
 
         widg4 = QWidget()
-        lbl2 = QLabel('Thanks for your love🤟.', self)
+        lbl2 = QLabel(self.tr('Thanks for your love🤟.'), self)
         blay4 = QHBoxLayout()
         blay4.setContentsMargins(0, 0, 0, 0)
         blay4.addStretch()
@@ -4289,7 +4336,7 @@ class WindowAbout(QWidget):  # 增加说明页面(About)
         widg4.setLayout(blay4)
 
         widg5 = QWidget()
-        lbl3 = QLabel('For more of my works, please visit the homepage🥰.', self)
+        lbl3 = QLabel(self.tr('For more of my works, please visit the homepage🥰.'), self)
         blay5 = QHBoxLayout()
         blay5.setContentsMargins(0, 0, 0, 0)
         blay5.addStretch()
@@ -4298,7 +4345,7 @@ class WindowAbout(QWidget):  # 增加说明页面(About)
         widg5.setLayout(blay5)
 
         widg6 = QWidget()
-        lbl4 = QLabel('Special thanks to ut.code(); of the University of Tokyo❤️.', self)
+        lbl4 = QLabel(self.tr('Special thanks to ut.code(); of the University of Tokyo❤️.'), self)
         blay6 = QHBoxLayout()
         blay6.setContentsMargins(0, 0, 0, 0)
         blay6.addStretch()
@@ -4307,7 +4354,7 @@ class WindowAbout(QWidget):  # 增加说明页面(About)
         widg6.setLayout(blay6)
 
         widg7 = QWidget()
-        lbl5 = QLabel('This app is under the protection of  GPL-3.0 license.', self)
+        lbl5 = QLabel(self.tr('This app is under the protection of GPL-3.0 license.'), self)
         blay7 = QHBoxLayout()
         blay7.setContentsMargins(0, 0, 0, 0)
         blay7.addStretch()
@@ -4317,10 +4364,10 @@ class WindowAbout(QWidget):  # 增加说明页面(About)
 
         widg8 = QWidget()
         widg8.setFixedHeight(50)
-        bt1 = WhiteButton('The Author')
+        bt1 = WhiteButton(self.tr('The Author'))
         bt1.setMinimumWidth(100)
         bt1.clicked.connect(self.intro)
-        bt2 = WhiteButton('Github Page')
+        bt2 = WhiteButton(self.tr('Github Page'))
         bt2.setMinimumWidth(100)
         bt2.clicked.connect(self.homepage)
         blay8 = QHBoxLayout()
@@ -4331,7 +4378,7 @@ class WindowAbout(QWidget):  # 增加说明页面(About)
         blay8.addStretch()
         widg8.setLayout(blay8)
 
-        bt7 = WhiteButton('Buy me a cup of coffee☕')
+        bt7 = WhiteButton(self.tr('Buy me a cup of coffee☕'))
         bt7.setMinimumWidth(215)
         bt7.clicked.connect(self.coffee)
         widg8_5 = QWidget()
@@ -4450,7 +4497,7 @@ class CustomDialog(QDialog):  # (About1)
 
     def initUI(self):
         self.setUpMainWindow()
-        self.setWindowTitle("Thank you for your support!")
+        self.setWindowTitle(self.tr("Thank you for your support!"))
         self.center()
         self.resize(440, 390)
         self.setFocus()
@@ -4474,16 +4521,16 @@ class CustomDialog(QDialog):  # (About1)
         bk.addWidget(l2)
         widge_all.setLayout(bk)
 
-        m1 = QLabel('Thank you for your kind support! 😊', self)
-        m2 = QLabel('I will write more interesting apps! 🥳', self)
+        m1 = QLabel(self.tr('Thank you for your kind support! 😊'), self)
+        m2 = QLabel(self.tr('I will write more interesting apps! 🥳'), self)
 
         widg_c = QWidget()
         widg_c.setFixedHeight(50)
-        bt1 = WhiteButton('Thank you!')
+        bt1 = WhiteButton(self.tr('Thank you!'))
         #bt1.setMaximumHeight(20)
         bt1.setMinimumWidth(100)
         bt1.clicked.connect(self.cancel)
-        bt2 = WhiteButton('Neither one above? Buy me a coffee~')
+        bt2 = WhiteButton(self.tr('Neither one above? Buy me a coffee~'))
         #bt2.setMaximumHeight(20)
         bt2.setMinimumWidth(260)
         bt2.clicked.connect(self.coffee)
@@ -4524,7 +4571,7 @@ class CustomDialog2(QDialog):  # (About2)
 
     def initUI(self):
         self.setUpMainWindow()
-        self.setWindowTitle("Thank you for your support!")
+        self.setWindowTitle(self.tr("Thank you for your support!"))
         self.center()
         self.resize(440, 390)
         self.setFocus()
@@ -4548,16 +4595,16 @@ class CustomDialog2(QDialog):  # (About2)
         bk.addWidget(l2)
         widge_all.setLayout(bk)
 
-        m1 = QLabel('Thank you for your kind support! 😊', self)
-        m2 = QLabel('I will write more interesting apps! 🥳', self)
+        m1 = QLabel(self.tr('Thank you for your kind support! 😊'), self)
+        m2 = QLabel(self.tr('I will write more interesting apps! 🥳'), self)
 
         widg_c = QWidget()
         widg_c.setFixedHeight(50)
-        bt1 = WhiteButton('Thank you!')
+        bt1 = WhiteButton(self.tr('Thank you!'))
         #bt1.setMaximumHeight(20)
         bt1.setMinimumWidth(100)
         bt1.clicked.connect(self.cancel)
-        bt2 = WhiteButton('Neither one above? Buy me a coffee~')
+        bt2 = WhiteButton(self.tr('Neither one above? Buy me a coffee~'))
         #bt2.setMaximumHeight(20)
         bt2.setMinimumWidth(260)
         bt2.clicked.connect(self.coffee)
@@ -4598,7 +4645,7 @@ class CustomDialog3(QDialog):  # (About3)
 
     def initUI(self):
         self.setUpMainWindow()
-        self.setWindowTitle("Thank you for your support!")
+        self.setWindowTitle(self.tr("Thank you for your support!"))
         self.center()
         self.resize(440, 390)
         self.setFocus()
@@ -4622,16 +4669,16 @@ class CustomDialog3(QDialog):  # (About3)
         bk.addWidget(l2)
         widge_all.setLayout(bk)
 
-        m1 = QLabel('Thank you for your kind support! 😊', self)
-        m2 = QLabel('I will write more interesting apps! 🥳', self)
+        m1 = QLabel(self.tr('Thank you for your kind support! 😊'), self)
+        m2 = QLabel(self.tr('I will write more interesting apps! 🥳'), self)
 
         widg_c = QWidget()
         widg_c.setFixedHeight(50)
-        bt1 = WhiteButton('Thank you!')
+        bt1 = WhiteButton(self.tr('Thank you!'))
         #bt1.setMaximumHeight(20)
         bt1.setMinimumWidth(100)
         bt1.clicked.connect(self.cancel)
-        bt2 = WhiteButton('Neither one above? Buy me a coffee~')
+        bt2 = WhiteButton(self.tr('Neither one above? Buy me a coffee~'))
         #bt2.setMaximumHeight(20)
         bt2.setMinimumWidth(260)
         bt2.clicked.connect(self.coffee)
@@ -4672,7 +4719,7 @@ class CustomDialog4(QDialog):  # (About4)
 
     def initUI(self):
         self.setUpMainWindow()
-        self.setWindowTitle("Thank you for your support!")
+        self.setWindowTitle(self.tr("Thank you for your support!"))
         self.center()
         self.resize(440, 390)
         self.setFocus()
@@ -4696,16 +4743,16 @@ class CustomDialog4(QDialog):  # (About4)
         bk.addWidget(l2)
         widge_all.setLayout(bk)
 
-        m1 = QLabel('Thank you for your kind support! 😊', self)
-        m2 = QLabel('I will write more interesting apps! 🥳', self)
+        m1 = QLabel(self.tr('Thank you for your kind support! 😊'), self)
+        m2 = QLabel(self.tr('I will write more interesting apps! 🥳'), self)
 
         widg_c = QWidget()
         widg_c.setFixedHeight(50)
-        bt1 = WhiteButton('Thank you!')
+        bt1 = WhiteButton(self.tr('Thank you!'))
         #bt1.setMaximumHeight(20)
         bt1.setMinimumWidth(100)
         bt1.clicked.connect(self.cancel)
-        bt2 = WhiteButton('Neither one above? Buy me a coffee~')
+        bt2 = WhiteButton(self.tr('Neither one above? Buy me a coffee~'))
         #bt2.setMaximumHeight(20)
         bt2.setMinimumWidth(260)
         bt2.clicked.connect(self.coffee)
@@ -4805,7 +4852,7 @@ class WindowUpdate(QWidget):  # 增加更新页面（Check for Updates）
         self.close_button.clicked.connect(self.close)
 
         widg5 = QWidget()
-        lbl1 = QLabel('Latest version:', self)
+        lbl1 = QLabel(self.tr('Latest version:'), self)
         self.lbl2 = QLabel('', self)
         blay5 = QHBoxLayout()
         blay5.setContentsMargins(0, 0, 0, 0)
@@ -4816,7 +4863,7 @@ class WindowUpdate(QWidget):  # 增加更新页面（Check for Updates）
         widg5.setLayout(blay5)
 
         widg3 = QWidget()
-        self.lbl = QLabel(f'Current version: v{VERSION}', self)
+        self.lbl = QLabel(self.tr(f'Current version: v%n').replace('%n', VERSION), self)
         blay3 = QHBoxLayout()
         blay3.setContentsMargins(0, 0, 0, 0)
         # blay3.addStretch()
@@ -4826,7 +4873,7 @@ class WindowUpdate(QWidget):  # 增加更新页面（Check for Updates）
 
         widg4 = QWidget()
         widg4.setFixedHeight(50)
-        lbl0 = QLabel('Check release:', self)
+        lbl0 = QLabel(self.tr('Check release:'), self)
         bt1 = WhiteButton('Github')
         bt1.clicked.connect(self.upd)
         blay4 = QHBoxLayout()
@@ -4891,17 +4938,17 @@ class WindowUpdate(QWidget):  # 增加更新页面（Check for Updates）
             pattern2 = re.compile(r'(v\d+\.\d+\.\d+)\sLatest')
             result = pattern2.findall(plain_text_utf8)
             result = ''.join(result)
-            nowversion = self.lbl.text().replace('Current Version: ', '').replace('Current version: ', '')
+            nowversion = 'v' + VERSION
             if result == nowversion:
-                alertupdate = result + ' (up-to-date)'
+                alertupdate = result + self.tr(' (up-to-date)')
                 self.lbl2.setText(alertupdate)
                 self.lbl2.adjustSize()
             else:
-                alertupdate = result + ' is ready!'
+                alertupdate = result + self.tr(' is ready!')
                 self.lbl2.setText(alertupdate)
                 self.lbl2.adjustSize()
         except:
-            alertupdate = 'No Intrenet'
+            alertupdate = self.tr('No Intrenet')
             self.lbl2.setText(alertupdate)
             self.lbl2.adjustSize()
 
@@ -4973,11 +5020,11 @@ class PermissionInfoWidget(QWidget):
 
         layout = QVBoxLayout()
 
-        title = QLabel("<h2>Permissions Required</h2>")
+        title = QLabel(self.tr("<h2>Permissions Required</h2>"))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
 
-        info_text = (
+        info_text = (self.tr(
             "<b>This application requires the following macOS permissions:</b><br><br>"
             "<b>Accessibility</b> and <b>Automation / AppleEvents:</b><br>"
             "Used to<br>"
@@ -5014,7 +5061,7 @@ class PermissionInfoWidget(QWidget):
 "• To adjust the order of the focused app or group, use Shift+left/right arrow keys. Changes are saved automatically.<br>"
 "• If you previously had many Launchpad groups and want to transfer them efficiently, Raspberry offers a paid feature to back up and import your group information before upgrading to macOS 26. About 80–90% of apps can be grouped with a click. If you have many apps, this feature can save you significant time!<br><br>"
 "<b>Enjoy using Raspberry! 😊🎉</b>"
-        )
+        ))
 
         info_label = QTextEdit()
         info_label.setReadOnly(True)
@@ -5148,6 +5195,14 @@ if __name__ == "__main__":
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+
+    lang_file = Path.home() / ".raspberry_lang"
+    if lang_file.exists():
+        lang = lang_file.read_text(encoding="utf-8").strip()
+    else:
+        lang = "system"  # 默认：跟随系统
+    load_translation(app, lang)
+
     apps = get_applications()
     permission = PermissionInfoWidget()
     permission.first_show_window()

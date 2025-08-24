@@ -3,14 +3,14 @@
 
 block_cipher = None
 
-__version__ = '0.0.5'
+__version__ = '0.0.6'
 
 info_plist = {
     'LSUIElement': False,
     #'LSBackgroundOnly': True,
     'NSHumanReadableCopyright': 'Copyright © 2025 Yixiang SHEN. All rights reserved.',
-    'CFBundleVersion': '5',
-    'CFBundleShortVersionString': '0.0.5',
+    'CFBundleVersion': '6',
+    'CFBundleShortVersionString': '0.0.6',
     "LSApplicationCategoryType": "public.app-category.productivity",
     "com.apple.security.app-sandbox": True,
     "NSPrincipalClass": "NSApplication",
@@ -26,7 +26,7 @@ a = Analysis(
     ['Raspberry.py'],
     pathex=['/Users/ryanshenefield/Downloads/Raspberry.py'],
     binaries=[],
-    datas=[('Raspberry_desk.icns', '.'), ('Raspberry_menu.png', '.'), ('wechat50.png', '.'), ('wechat20.png', '.'), ('wechat10.png', '.'), ('wechat5.png', '.'), ('alipay50.png', '.'), ('alipay20.png', '.'), ('alipay10.png', '.'), ('alipay5.png', '.'), ('com.ryanthehito.raspberry.plist', '.'), ('lporg', '.')],
+    datas=[('Raspberry_desk.icns', '.'), ('Raspberry_menu.png', '.'), ('wechat50.png', '.'), ('wechat20.png', '.'), ('wechat10.png', '.'), ('wechat5.png', '.'), ('alipay50.png', '.'), ('alipay20.png', '.'), ('alipay10.png', '.'), ('alipay5.png', '.'), ('com.ryanthehito.raspberry.plist', '.'), ('lporg', '.'), ('zh_CN.qm', 'i18n')],
     hiddenimports=['subprocess', 'AppKit', 'PyQt6.sip'],
     hookspath=[],
     hooksconfig={},

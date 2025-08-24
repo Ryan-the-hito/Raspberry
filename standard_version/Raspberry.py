@@ -42,7 +42,7 @@ os.makedirs(ICON_CACHE_DIR, exist_ok=True)
 APP_PATHS_FILE = os.path.expanduser("~/.launchpad_app_paths.json")
 APP_ORDER_FILE = os.path.expanduser("~/.launchpad_app_order.json")
 MAIN_ORDER_FILE = os.path.expanduser("~/.launchpad_main_order.json")
-VERSION = "0.0.5"
+VERSION = "0.0.6"
 NAME = 'Raspberry'
 
 os.environ["QT_QUICK_BACKEND"] = "metal"

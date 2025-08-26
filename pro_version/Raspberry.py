@@ -185,6 +185,12 @@ target_dir = os.path.join(base_dir, resource_tarname)
 # 只在目标目录不存在文件时才复制
 for item in source_dir.iterdir():
     target_item = os.path.join(target_dir, item.name)
+    # 特例：i18n 文件夹必须强制更新
+    if item.is_dir() and item.name == "i18n":
+        if os.path.exists(target_item):
+            shutil.rmtree(target_item)  # 先删掉旧的
+        shutil.copytree(item, target_item)
+        continue
     if os.path.exists(target_item):
         continue  # 已存在就跳过
     if item.is_dir():
@@ -2812,9 +2818,9 @@ class LaunchpadWindow(QWidget):
         # Add Language Menu
         self.lang_menu = self.menu_bar.addMenu(self.tr("Language"))
 
-        # ("ja_JP", "日本語")
         for code, label in [("en", "English"),
-                            ("zh_CN", "简体中文")]:
+                            ("zh_CN", "简体中文"),
+                            ("ja_JP", "日本語")]:
             act = QAction(label, self)
             act.setCheckable(True)
             act.triggered.connect(lambda _, c=code: self.change_language(c))
@@ -4048,11 +4054,71 @@ class LaunchpadWindow(QWidget):
                     # if dlg.exec() == 0:  # 用户点了 Restart
                     #     QTimer.singleShot(0, self.restart_app)
             else:
-                msg = CustomMessageBox(self.tr(f"Execution failed.\nOutput:\n%n").replace('%n', output), parent=self, buttons=(self.tr("OK"),))
-                msg.exec()
+                try:  # 尝试直接找对应的文件，因为之前可能已经备份过
+                    lporg_yml_dir = Path.home() / "Library/Application Support" / 'lporg' / 'config.yml'
+                    with open(lporg_yml_dir, "r", encoding="utf-8") as f:
+                        yml_data = f.read()
+                    with open(APP_PATHS_FILE, "r", encoding="utf-8") as f:
+                        match_json_data = f.read()
+                    result = self.yml_to_json(yml_data, match_json_data)
+                    with open(GROUPS_FILE, "w", encoding="utf-8") as f:
+                        json.dump(result, f, ensure_ascii=False, indent=2)
+                    self.reload_groups()
+                    dlg = RestartMessageBox(self.tr("Executed successfully.\nRaspberry will restart."), parent=self,
+                                            buttons=(self.tr("OK"), self.tr("Later")))
+                    dlg.exec()
+                except Exception as e:  # 如果还是找不到，再尝试恢复为苹果默认格式
+                    try:
+                        lporg_yml_dir = Path.home() / "Library/Application Support" / 'com.ryanthehito.raspberry' / 'Resources' / 'config.yml'
+                        with open(lporg_yml_dir, "r", encoding="utf-8") as f:
+                            yml_data = f.read()
+                        with open(APP_PATHS_FILE, "r", encoding="utf-8") as f:
+                            match_json_data = f.read()
+                        result = self.yml_to_json(yml_data, match_json_data)
+                        with open(GROUPS_FILE, "w", encoding="utf-8") as f:
+                            json.dump(result, f, ensure_ascii=False, indent=2)
+                        self.reload_groups()
+                        dlg = RestartMessageBox(self.tr("Executed successfully. (Back to default mode)\nRaspberry will restart."),
+                                                parent=self,
+                                                buttons=(self.tr("OK"), self.tr("Later")))
+                        dlg.exec()
+                    except Exception as e:
+                        msg = CustomMessageBox(self.tr(f"Execution failed.\nOutput:\n%n").replace('%n', output), parent=self, buttons=(self.tr("OK"),))
+                        msg.exec()
         except Exception as e:
-            msg = CustomMessageBox(self.tr(f"Error:\n%n").replace('%n', str(e)), parent=self, buttons=(self.tr("OK"),))
-            msg.exec()
+            try:  # 尝试直接找对应的文件，因为之前可能已经备份过
+                lporg_yml_dir = Path.home() / "Library/Application Support" / 'lporg' / 'config.yml'
+                with open(lporg_yml_dir, "r", encoding="utf-8") as f:
+                    yml_data = f.read()
+                with open(APP_PATHS_FILE, "r", encoding="utf-8") as f:
+                    match_json_data = f.read()
+                result = self.yml_to_json(yml_data, match_json_data)
+                with open(GROUPS_FILE, "w", encoding="utf-8") as f:
+                    json.dump(result, f, ensure_ascii=False, indent=2)
+                self.reload_groups()
+                dlg = RestartMessageBox(self.tr("Executed successfully.\nRaspberry will restart."), parent=self,
+                                        buttons=(self.tr("OK"), self.tr("Later")))
+                dlg.exec()
+            except Exception as e:  # 如果还是找不到，再尝试恢复为苹果默认格式
+                try:
+                    lporg_yml_dir = Path.home() / "Library/Application Support" / 'com.ryanthehito.raspberry' / 'Resources' / 'config.yml'
+                    with open(lporg_yml_dir, "r", encoding="utf-8") as f:
+                        yml_data = f.read()
+                    with open(APP_PATHS_FILE, "r", encoding="utf-8") as f:
+                        match_json_data = f.read()
+                    result = self.yml_to_json(yml_data, match_json_data)
+                    with open(GROUPS_FILE, "w", encoding="utf-8") as f:
+                        json.dump(result, f, ensure_ascii=False, indent=2)
+                    self.reload_groups()
+                    dlg = RestartMessageBox(
+                        self.tr("Executed successfully. (Back to default mode)\nRaspberry will restart."),
+                        parent=self,
+                        buttons=(self.tr("OK"), self.tr("Later")))
+                    dlg.exec()
+                except Exception as e:
+                    msg = CustomMessageBox(self.tr(f"Execution failed.\nOutput:\n%n").replace('%n', output),
+                                           parent=self, buttons=(self.tr("OK"),))
+                    msg.exec()
 
     def animate_page_transition(self, next_page_items, direction="left"):
         grid_layout = self.main_content.grid_layout
@@ -5215,9 +5281,10 @@ if __name__ == "__main__":
     app.setStyleSheet(style_sheet_ori)
 
     def bring_main_window_to_front():
-        win.showNormal()  # 如果窗口被最小化
-        win.raise_()  # 提到最前
-        win.activateWindow()  # 获取焦点
+        pass
+        # win.showNormal()  # 如果窗口被最小化
+        # win.raise_()  # 提到最前
+        # win.activateWindow()  # 获取焦点
 
     _server = QLocalServer()
     QLocalServer.removeServer(SINGLETON)

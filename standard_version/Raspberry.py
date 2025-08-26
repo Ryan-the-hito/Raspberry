@@ -42,7 +42,7 @@ os.makedirs(ICON_CACHE_DIR, exist_ok=True)
 APP_PATHS_FILE = os.path.expanduser("~/.launchpad_app_paths.json")
 APP_ORDER_FILE = os.path.expanduser("~/.launchpad_app_order.json")
 MAIN_ORDER_FILE = os.path.expanduser("~/.launchpad_main_order.json")
-VERSION = "0.0.6"
+VERSION = "0.0.7"
 NAME = 'Raspberry'
 
 os.environ["QT_QUICK_BACKEND"] = "metal"
@@ -4907,9 +4907,10 @@ if __name__ == "__main__":
     app.setStyleSheet(style_sheet_ori)
 
     def bring_main_window_to_front():
-        win.showNormal()  # 如果窗口被最小化
-        win.raise_()  # 提到最前
-        win.activateWindow()  # 获取焦点
+        pass
+        # win.showNormal()  # 如果窗口被最小化
+        # win.raise_()  # 提到最前
+        # win.activateWindow()  # 获取焦点
 
     _server = QLocalServer()
     QLocalServer.removeServer(SINGLETON)

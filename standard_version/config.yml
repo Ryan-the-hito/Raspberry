@@ -1,0 +1,117 @@
+apps:
+  pages:
+    - number: 1
+      items:
+        - App Store
+        - Safari
+        - Mail
+        - Contacts
+        - Calendar
+        - Reminders
+        - Notes
+        - FaceTime
+        - Messages
+        - Maps
+        - Find My
+        - Photo Booth
+        - Photos
+        - Music
+        - Podcasts
+        - TV
+        - Voice Memos
+        - Weather
+        - News
+        - Stocks
+        - Books
+        - Clock
+        - Calculator
+        - Freeform
+        - Home
+        - Siri
+        - iPhone Mirroring
+        - Passwords
+        - System Settings
+        - folder: Other
+          pages:
+            - number: 1
+              items:
+                - Shortcuts
+                - QuickTime Player
+                - Dictionary
+                - TextEdit
+                - Font Book
+                - Screen Sharing
+                - Mission Control
+                - Time Machine
+                - Preview
+                - Screenshot
+                - Image Capture
+                - Digital Color Meter
+                - ColorSync Utility
+                - Stickies
+                - Grapher
+                - VoiceOver Utility
+                - Print Center
+                - Automator
+                - Script Editor
+                - Audio MIDI Setup
+                - Bluetooth File Exchange
+                - Disk Utility
+                - System Information
+                - Activity Monitor
+                - Console
+                - Terminal
+                - AirPort Utility
+                - Migration Assistant
+                - Tips
+                - Magnifier
+                - Feedback Assistant
+        - folder: Games
+          pages:
+            - number: 1
+              items:
+                - Chess
+    - number: 2
+      items:
+        - Games
+        - Apps
+        - Journal
+        - Phone
+widgets:
+  pages: []
+dock_items:
+  apps:
+    - /System/Applications/Apps.app
+    - /System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app
+    - /System/Applications/Messages.app
+    - /System/Applications/Mail.app
+    - /System/Applications/Maps.app
+    - /System/Applications/Photos.app
+    - /System/Applications/FaceTime.app
+    - /System/Applications/Phone.app
+    - /System/Applications/Calendar.app
+    - /System/Applications/Contacts.app
+    - /System/Applications/Reminders.app
+    - /System/Applications/Notes.app
+    - /System/Applications/Freeform.app
+    - /System/Applications/TV.app
+    - /System/Applications/Music.app
+    - /System/Applications/Games.app
+    - /System/Applications/App Store.app
+    - /System/Applications/iPhone Mirroring.app
+    - /System/Applications/System Settings.app
+    - /System/Applications/News.app
+    - /System/Library/CoreServices/Applications/Feedback Assistant.app
+  others:
+    - path: ~/Downloads
+      view: 1
+      sort: 2
+  settings:
+    autohide: false
+    largesize: null
+    magnification: false
+    minimize-to-application: false
+    mru-spaces: false
+    show-recents: false
+    tilesize: null
+desktop: {}

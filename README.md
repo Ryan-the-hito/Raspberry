@@ -250,9 +250,14 @@ If you like Raspberry, please click Star or submit an Issue. You can also follow
 
 - [x] Do not start another Raspberry if one is already running (exit the other)
 
-- [ ] Shortcut key to close the main interface
+- [x] Shortcut key to close the main interface
 
 ## Versions
+
+### v0.0.8
+
+- Fixed a bug in Pro version that is not displaying the right version number.
+- Added a shortcut key to close the main interface
 
 ### v0.0.7
 

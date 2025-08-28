@@ -8,7 +8,7 @@
 
 Raspberry is another macOS Launchpad alternative and even better to help you organize your groups on macOS Tahoe.
 
-## Problems to Solve
+## Why Choose This App?
 
 Starting from macOS 26, Launchpad will become a completely new app called "Apps." From then on, the familiar interface of Launchpad will no longer be visible in the system. Although Apps has built-in software categories, it no longer supports custom grouping and categorization. This is undoubtedly negative news for users who need the original Launchpad interface and custom groups. Therefore, many people have created alternatives to Launchpad, with Raspberry being one of them, aiming to restore the basic functions of Launchpad while improving the user experience of some features. For example, compared to the original Launchpad, Raspberry provides a more flexible way of grouping through right-click, helping users efficiently organize and access applications, enhancing the desktop management experience.
 

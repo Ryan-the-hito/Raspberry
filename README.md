@@ -36,6 +36,8 @@ Raspberry 注意到了这个需求，作为 Raspberry 的作者，我的 Mac 上
 
 ### 右键分组、添加、移除、重命名应用，分组管理高效便捷
 
+https://github.com/user-attachments/assets/db7b64ef-cf7a-4388-8944-2e09988c282e
+
 除了左键的基本功能外，Raspberry 在原生 Launchpad 的基础上增加了右键功能，可以为一个软件创建分组、加入分组、从一个分组移动到另一个分组、移回主界面以及移动到垃圾篓。
 
 ### 支持快捷键快速操作与排序，提升效率

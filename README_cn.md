@@ -1,20 +1,20 @@
-# 🫐Raspberry: A Better Launchpad
+# 🫐Raspberry: 把 macOS启动台带回来
 
-![w9zXSGp](https://i.imgur.com/w9zXSGp.png)
+![i9kpes0](https://i.imgur.com/i9kpes0.png)
 
 <p align="center"><a href="README.md">English</a> | 简体中文</p>
 
 <p align="center"><a href="https://t.me/+AODLypeF_aYwYjNh">Telegram</a> | <a href="https://twitter.com/ryanswindows">Twitter</a> | <a href="https://weibo.com/ryanthehitos">Weibo</a></p>
 
-Raspberry is another macOS Launchpad alternative and even better to help you organize your groups on macOS Tahoe.
+Raspberry 是一个 macOS 启动台的替代品，能帮助您在 macOS Tahoe 上组织管理软件和分组。
 
 ## 解决问题
 
-从 macOS 26 起，Launchpad 将变为一个全新的 app——Apps。自此之后，Launchpad 的熟悉界面将再也无法在系统中看到了。虽然 Apps 中有自带的软件分类，但却无法再支持自定义分组分类。对于需要 Launchpad 原生界面以及自定义分组的用户来说，这无疑是一个负面消息。因此，有很多人制作了 Launchpad 的替代品，Raspberry 也是其中之一，旨在还原 Launchpad 的基本功能的同时，弥补甚至提升部分功能的使用体验。例如，相比原生 Launchpad，Raspberry 通过右键方式提供更灵活的分组方式，帮助用户高效整理和访问应用，提升桌面管理体验。
+从 macOS 26 起，启动台将变为一个全新的 app——Apps。自此之后，启动台的熟悉界面将再也无法在系统中看到了。虽然 Apps 中有自带的软件分类，但却无法再支持自定义分组分类。对于需要启动台原生界面以及自定义分组的用户来说，这无疑是一个负面消息。因此，有很多人制作了启动台的替代品，Raspberry 也是其中之一，旨在还原启动台的基本功能的同时，弥补甚至提升部分功能的使用体验。例如，相比原生 Launchpad，Raspberry 通过右键方式提供更灵活的分组方式，帮助用户高效整理和访问应用，提升桌面管理体验。
 
 ## 功能亮点
 
-### 自动保存分组和排序设置（所有版本），导入原有 Launchpad 分组，迁移更省心，备份恢复不用愁（付费专享）
+### 自动保存分组和排序设置（所有版本），导入原有启动台分组，迁移更省心，备份恢复不用愁（付费专享）
 
 **虽然许多启动器软件都具有手动分组功能，但对于从前代 macOS 转移过来的用户来说，迁移现有的分组信息才是大麻烦。**
 
@@ -22,9 +22,9 @@ Raspberry is another macOS Launchpad alternative and even better to help you org
 
 https://github.com/user-attachments/assets/48e4dd4a-f630-4f49-9d56-ee80bacad3e1
 
-Raspberry 主打这项功能。作为 Raspberry 的作者，我的 Mac 上有超过 700 个软件和 21 个分组，如果要一个一个软件再分组一次，这得是多大的工程！（更别提以前 Launchpad 需要拖拽才能分组，更困难了）
+Raspberry 主打这项功能。作为 Raspberry 的作者，我的 Mac 上有超过 700 个软件和 21 个分组，如果要一个一个软件再分组一次，这得是多大的工程！（更别提以前启动台需要拖拽才能分组，更困难了）
 
-因此，Raspberry 在付费版中增加了迁移功能，可以将用户在 macOS 26 之前系统上的 Launchpad 分组保存在本地，待用户升级到 macOS 26 之后，再一键恢复。（需要注意的是：**此功能需要在升级前就购买并安装 Raspberry 的付费版并正确操作**）
+因此，Raspberry 在付费版中增加了迁移功能，可以将用户在 macOS 26 之前系统上的启动台分组保存在本地，待用户升级到 macOS 26 之后，再一键恢复。（需要注意的是：**此功能需要在升级前就购买并安装 Raspberry 的付费版并正确操作**）
 
 此外，用户还可随时保存自己当前的分组结构，亦可在任何时候回复到之前的存档点：
 
@@ -48,7 +48,7 @@ https://github.com/user-attachments/assets/efa1de8d-48ad-4aec-996f-f4d6dcd7bbd3
 
 ### 右键分组、添加、移除、重命名应用，分组管理高效便捷
 
-除了左键的基本功能外，Raspberry 在原生 Launchpad 的基础上增加了右键功能，可以为一个软件创建分组、加入分组、从一个分组移动到另一个分组、移回主界面以及移动到垃圾篓。
+除了左键的基本功能外，Raspberry 在原生启动台的基础上增加了右键功能，可以为一个软件创建分组、加入分组、从一个分组移动到另一个分组、移回主界面以及移动到垃圾篓。
 
 https://github.com/user-attachments/assets/db7b64ef-cf7a-4388-8944-2e09988c282e
 
@@ -102,15 +102,15 @@ https://github.com/user-attachments/assets/e783b225-b88b-4d3e-8642-3202b0f5c1cd
 
 当打开一个分组后，按下 Tab 键可以关闭当前分组并回到主界面。
 
-### 从原生 Launchpad 中去除了拖拽
+### 从原生启动台中去除了拖拽
 
-在原生的 Launchpad 中，用户可以通过拖拽的方式，将两个软件的图标组合在一起，形成一个组别，Raspberry 倾向于使用右键的方式，因此不再添加这个功能。另外，原生的 Launchpad 因为只能通过拖拽添加组别，因此当用户将一个软件拖拽加入位于行尾的组别中时，会变成经典的猫鼠追逐游戏。此外，让用户手动将上百个软件从多页之后手动拖拽到第一页的指定组别中，非常耗费精力，不是简洁的设计。
+在原生的启动台中，用户可以通过拖拽的方式，将两个软件的图标组合在一起，形成一个组别，Raspberry 倾向于使用右键的方式，因此不再添加这个功能。另外，原生的启动台因为只能通过拖拽添加组别，因此当用户将一个软件拖拽加入位于行尾的组别中时，会变成经典的猫鼠追逐游戏。此外，让用户手动将上百个软件从多页之后手动拖拽到第一页的指定组别中，非常耗费精力，不是简洁的设计。
 
 同时，Raspberry 也去除了通过拖拽来改变软件顺序的功能，取而代之的是使用快捷键，这会极大地增添稳定性，以前通过拖拽手势，把一个软件从很后面的页面里拽到前面的事情不会再发生了。
 
-### 增大了原生 Launchpad 的圆点，便于鼠标点击
+### 增大了原生启动台的圆点，便于鼠标点击
 
-在原生 Launchpad 中，页面下方的圆点也是可以点击并用来跳转的，但可惜的是尺寸太小，不便于点击。Raspberry 在复刻的时候把这些圆点做得更大、便于点击，无论用户习惯用鼠标还是快捷键，都能很方便地使用。
+在原生启动台中，页面下方的圆点也是可以点击并用来跳转的，但可惜的是尺寸太小，不便于点击。Raspberry 在复刻的时候把这些圆点做得更大、便于点击，无论用户习惯用鼠标还是快捷键，都能很方便地使用。
 
 ## 界面一览
 
@@ -148,7 +148,7 @@ Raspberry 拥有简洁美观的界面设计，分组一目了然，操作流畅�
 |      | 免费版                      | 付费版                      |
 |------|-----------------------------|-----------------------------|
 | 基本功能 |1. 索引所有应用，支持自动更新新应用<br>2. 启动应用<br>3. 右键分组、添加、移除、重命名应用<br>4. 快捷键快速操作与排序 | 1. 索引所有应用，支持自动更新新应用<br>2. 启动应用<br>3. 右键分组、添加、移除、重命名应用<br>4. 快捷键快速操作与排序|
-| 高级功能 | 无 | 5. 导入原有 Launchpad 分组<br>6. 手动备份当前分组并恢复|
+| 高级功能 | 无 | 5. 导入原有启动台分组<br>6. 手动备份当前分组并恢复<br>7. 多语言支持（免费版为英语界面）|
 | 价格 | 免费                        | $3 （东京时间 2025 年 9 月 1 日 0 时前）<br>此后将变为 $5    |
 | 获取 | [Github Releases](https://github.com/Ryan-the-hito/Raspberry/releases)  | [点击购买](https://www.buymeacoffee.com/ryanthehito) |
 
@@ -232,42 +232,50 @@ https://github.com/user-attachments/assets/1208f7f0-fa26-450b-a956-e17cc62c03d1
 
 ### v0.0.7
 
-Added Japanese UI interface.
+添加了日语用户界面。
 
 ### v0.0.6
 
-Added Chinese UI interface.
+添加了中文用户界面。
 
 ### v0.0.5
 
-Bug fixes in v0.0.5:
+v0.0.5中的错误修复：
 
-- Resolved an issue when using multiple displays will result in unadjustable sizes;
-- Fixed a bug that it could be launched twice.
+- 解决了使用多个显示器会导致大小无法调整的问题；
+
+- 修复了可以启动两次的bug。
 
 ### v0.0.4
 
-Bug fixes in v0.0.4:
+v0.0.4中的错误修复：
 
-- Resolved a bug when dark theme cannot be implemented for pop-up warning windows;
-- Fixed the renaming bug in the right-click menu;
-- Fixed the bug when clicking the blank areas in the main window cannot trigger closing actions;
-- Added new feature to backup and restoring backups for paid version.
+- 解决了深色主题下无法实现弹出警告窗口的bug；
+
+- 修复了右键菜单中的重命名bug；
+
+- 修复了点击主窗口空白区域无法触发关闭操作的bug；
+
+- 为付费版本添加了备份和恢复备份的新功能。
 
 ### v0.0.3
 
-Bug fixes and new animations in v0.0.3:
+v0.0.3中的错误修复和新动画：
 
-- Fixed a bug when menu shows wrong color under dark theme;
-- Added animation for the search bar when under focus;
-- Added glass-like widget for groups;
-- All the icons are now top aligned when displayed;
-- Added animation when changing pages.
+- 修复了菜单在深色主题下显示错误颜色的bug；
+
+- 添加了搜索框在聚焦时的动画；
+
+- 添加了类似玻璃的控件用于分组；
+
+- 所有图标现在在显示时都居顶对齐；
+
+- 添加了翻页时的动画。
 
 ### v0.0.2
 
-Bug fixes.
+错误修复。
 
 ### v 0.0.1
 
-The very initial release. 
+最初的发布版本。

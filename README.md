@@ -18,27 +18,27 @@ Raspberry is another macOS Launchpad alternative and even better to help you org
 
 **虽然许多启动器软件都具有手动分组功能，但对于从前代 macOS 转移过来的用户来说，迁移现有的分组信息才是大麻烦。**
 
+注意看下面演示中背景发生的变化，几乎在一瞬间，大部分的软件找回了自己原有的组合：
+
 https://github.com/user-attachments/assets/48e4dd4a-f630-4f49-9d56-ee80bacad3e1
 
-Raspberry 注意到了这个需求，作为 Raspberry 的作者，我的 Mac 上有超过 700 个软件和 21 个分组，如果要一个一个软件再分组一次，这得是多大的工程！（更别提以前 Launchpad 需要拖拽才能分组，更困难了）
+Raspberry 主打这项功能。作为 Raspberry 的作者，我的 Mac 上有超过 700 个软件和 21 个分组，如果要一个一个软件再分组一次，这得是多大的工程！（更别提以前 Launchpad 需要拖拽才能分组，更困难了）
 
 因此，Raspberry 在付费版中增加了迁移功能，可以将用户在 macOS 26 之前系统上的 Launchpad 分组保存在本地，待用户升级到 macOS 26 之后，再一键恢复。（需要注意的是：**此功能需要在升级前就购买并安装 Raspberry 的付费版并正确操作**）
 
-此外，用户还可随时保存自己当前的分组结构，亦可在任何时候回复到之前的存档点。
+此外，用户还可随时保存自己当前的分组结构，亦可在任何时候回复到之前的存档点：
 
 https://github.com/user-attachments/assets/030cad24-007d-4323-98c9-90f302cabd41
 
 ### 首次启动自动索引所有应用，支持自动更新新应用
 
-https://github.com/user-attachments/assets/6097778f-b5f9-4b0a-8b89-98c0152532d1
-
 首次启动时，Raspberry 的图标会在 Dock 栏中跳动多时，这是正常现象，因为它正在索引电脑中的 app，这个索引不基于 Spotlight，因此即便更新系统，也保存在本地不丢失。
 
-### 一键启动应用，操作流畅
+索引完成之后，首次打开主界面是这样的：
 
-<p align="center">
-  <img src="https://i.imgur.com/ASvXDsJ.png" width=400 />
-</p>
+https://github.com/user-attachments/assets/6097778f-b5f9-4b0a-8b89-98c0152532d1
+
+### 一键启动应用，操作流畅
 
 如所有启动软件一样，左键单击某一个软件的图标，即可打开运行这个软件。如果单击的是分组，那么就会打开这个分组。
 
@@ -48,9 +48,9 @@ https://github.com/user-attachments/assets/efa1de8d-48ad-4aec-996f-f4d6dcd7bbd3
 
 ### 右键分组、添加、移除、重命名应用，分组管理高效便捷
 
-https://github.com/user-attachments/assets/db7b64ef-cf7a-4388-8944-2e09988c282e
-
 除了左键的基本功能外，Raspberry 在原生 Launchpad 的基础上增加了右键功能，可以为一个软件创建分组、加入分组、从一个分组移动到另一个分组、移回主界面以及移动到垃圾篓。
+
+https://github.com/user-attachments/assets/db7b64ef-cf7a-4388-8944-2e09988c282e
 
 ### 支持快捷键快速操作与排序，提升效率
 
@@ -134,6 +134,12 @@ Raspberry 拥有简洁美观的界面设计，分组一目了然，操作流畅�
 2. 拖拽应用至分组面板，自定义分组名称。
 3. 可在设置中进行备份与恢复分组（付费版专享）。
 4. 按需切换语言（开发中）。
+
+双击不同区域对应不同功能效果：
+
+<p align="center">
+  <img src="https://i.imgur.com/ASvXDsJ.png" width=600 />
+</p>
 
 ## 注意事项
 

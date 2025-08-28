@@ -116,6 +116,16 @@ https://github.com/user-attachments/assets/e783b225-b88b-4d3e-8642-3202b0f5c1cd
 
 Raspberry 拥有简洁美观的界面设计，分组一目了然，操作流畅。分组与应用图标清晰呈现，支持快速查找和切换。
 
+![4jWmZEt](https://i.imgur.com/4jWmZEt.jpeg)
+
+![fDQMlMu](https://i.imgur.com/fDQMlMu.jpeg)
+
+![VUsWFd1](https://i.imgur.com/VUsWFd1.png)
+
+![DmbQqdR](https://i.imgur.com/DmbQqdR.png)
+
+![mjMMKoR](https://i.imgur.com/mjMMKoR.png)
+
 ## 环境要求
 
 - 操作系统：macOS Tahoe 及以上版本

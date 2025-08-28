@@ -36,6 +36,10 @@ https://github.com/user-attachments/assets/6097778f-b5f9-4b0a-8b89-98c0152532d1
 
 ### 一键启动应用，操作流畅
 
+<p align="center">
+  <img src="https://i.imgur.com/ASvXDsJ.png" width=400 />
+</p>
+
 如所有启动软件一样，左键单击某一个软件的图标，即可打开运行这个软件。如果单击的是分组，那么就会打开这个分组。
 
 除单击外，Raspberry 还增加了双击的方法，可以通过双击退出界面、双击重命名等。

@@ -150,7 +150,7 @@ Raspberry 拥有简洁美观的界面设计，分组一目了然，操作流畅�
 | 基本功能 |1. 索引所有应用，支持自动更新新应用<br>2. 启动应用<br>3. 右键分组、添加、移除、重命名应用<br>4. 快捷键快速操作与排序 | 1. 索引所有应用，支持自动更新新应用<br>2. 启动应用<br>3. 右键分组、添加、移除、重命名应用<br>4. 快捷键快速操作与排序|
 | 高级功能 | 无 | 5. 导入原有启动台分组<br>6. 手动备份当前分组并恢复<br>7. 多语言支持（免费版为英语界面）|
 | 价格 | 免费                        | $3 （东京时间 2025 年 9 月 1 日 0 时前）<br>此后将变为 $5    |
-| 获取 | [Github Releases](https://github.com/Ryan-the-hito/Raspberry/releases)  | [点击购买](https://www.buymeacoffee.com/ryanthehito) |
+| 获取 | [Github Releases](https://github.com/Ryan-the-hito/Raspberry/releases)  | [点击购买](https://buymeacoffee.com/ryanthehito/e/451635) |
 
 购买与支付说明：
 

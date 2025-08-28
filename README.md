@@ -150,7 +150,7 @@ The free version only includes basic features, while the paid version, in additi
 | Basic Features | 1. Index all applications, supports automatic update of new applications<br>2. Launch applications<br>3. Right-click to group, add, remove, and rename applications<br>4. Use shortcuts for quick operations and sorting | 1. Index all applications, supports automatic update of new applications<br>2. Launch applications<br>3. Right-click to group, add, remove, and rename applications<br>4. Use shortcuts for quick operations and sorting|
 | Advanced Features | None | 5. Import existing Launchpad groups<br>6. Manually backup and restore current groups<br>7. Multiple languages other than English|
 | Price | Free | $3 (before 0:00 on September 1, 2025 in Tokyo time)<br>Thereafter will be $5|
-| Obtain | [Github Releases](https://github.com/Ryan-the-hito/Raspberry/releases) | [Click to Buy](https://www.buymeacoffee.com/ryanthehito) |
+| Obtain | [Github Releases](https://github.com/Ryan-the-hito/Raspberry/releases) | [Click to Buy](https://buymeacoffee.com/ryanthehito/e/451635) |
 
 Purchase and Payment Instructions:
 

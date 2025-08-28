@@ -172,15 +172,19 @@ Raspberry 拥有简洁美观的界面设计，分组一目了然，操作流畅�
 
 本软件并无设置界面，如果在软件内部需要使用说明，可以前往“关于”菜单栏，即可看到指南窗口按钮，内附一份快速引导。
 
-1. 启动 Raspberry 应用，**初次启动会在程序坞中弹跳数次，这是正常现象，请勿人为关闭。弹跳时长视软件数量而定，长可达十数分钟，请耐心等待。**
+1. 启动 Raspberry 应用，**初次启动会在程序坞中弹跳数次，这是正常现象，请勿人为关闭。弹跳时长视软件数量而定，长可达十数分钟，请耐心等待。此后正常使用不会出现此现象。**
 
 https://github.com/user-attachments/assets/1208f7f0-fa26-450b-a956-e17cc62c03d1
+
+由于软件主界面元素的加载必须在主线程中完成，因此无法在后台悄无声息地建立索引。但只要正常使用，建立的索引不会无故消失，因此此后便不会再出现类似情形。
 
 2. 需注意：**双击不同区域对应不同功能效果：**
 
 <p align="center">
   <img src="https://i.imgur.com/ASvXDsJ.png" width=600 />
 </p>
+
+3. 如果点击了选项让 Raspberry 清空缓存并重新索引，请勿重复点击此按钮，并在缓存完成前不要退出应用。
 
 ## 注意事项
 
@@ -205,7 +209,7 @@ https://github.com/user-attachments/assets/1208f7f0-fa26-450b-a956-e17cc62c03d1
 
 如果你喜欢 Raspberry，欢迎点 Star 或提交 Issue。也可通过 GitHub 关注作者，支持项目持续更新。
 
-[Buy Me a Cup of Coffee](https://www.buymeacoffee.com/ryanthehito)
+[![D4KakEu](https://i.imgur.com/D4KakEu.png)](https://www.buymeacoffee.com/ryanthehito)
 
 <p align="center">
   <img src="https://i.imgur.com/OHHJD4y.png" width=240 />
@@ -214,14 +218,56 @@ https://github.com/user-attachments/assets/1208f7f0-fa26-450b-a956-e17cc62c03d1
 
 ## 待办功能
 
-[x] 多语言
-[x] 备份 group 和恢复备份
-[x] 暗色主题下菜单背景颜色 bug
-[x] 搜索框聚焦后动画效果
-[x] 加上分组的边框效果
-[x] 多屏幕自动检测尺寸
-[x] 主界面上重命名 bug
-[x] 如果已经有一个 Raspberry 在运行，就不要启动另一个（退出另一个）
-[ ] 关闭主界面的快捷键
+-[x] 多语言
+-[x] 备份 group 和恢复备份
+-[x] 暗色主题下菜单背景颜色 bug
+-[x] 搜索框聚焦后动画效果
+-[x] 加上分组的边框效果
+-[x] 多屏幕自动检测尺寸
+-[x] 主界面上重命名 bug
+-[x] 如果已经有一个 Raspberry 在运行，就不要启动另一个（退出另一个）
+-[ ] 关闭主界面的快捷键
 
 ## 版本历史
+
+### v0.0.7
+
+Added Japanese UI interface.
+
+### v0.0.6
+
+Added Chinese UI interface.
+
+### v0.0.5
+
+Bug fixes in v0.0.5:
+
+- Resolved an issue when using multiple displays will result in unadjustable sizes;
+- Fixed a bug that it could be launched twice.
+
+### v0.0.4
+
+Bug fixes in v0.0.4:
+
+- Resolved a bug when dark theme cannot be implemented for pop-up warning windows;
+- Fixed the renaming bug in the right-click menu;
+- Fixed the bug when clicking the blank areas in the main window cannot trigger closing actions;
+- Added new feature to backup and restoring backups for paid version.
+
+### v0.0.3
+
+Bug fixes and new animations in v0.0.3:
+
+- Fixed a bug when menu shows wrong color under dark theme;
+- Added animation for the search bar when under focus;
+- Added glass-like widget for groups;
+- All the icons are now top aligned when displayed;
+- Added animation when changing pages.
+
+### v0.0.2
+
+Bug fixes.
+
+### v 0.0.1
+
+The very initial release. 

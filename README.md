@@ -165,19 +165,18 @@ Raspberry 拥有简洁美观的界面设计，分组一目了然，操作流畅�
 
 1. 前往 [GitHub 仓库](https://github.com/Ryan-the-hito/Raspberry) 下载最新版本；
 2. 解压安装包，打开 dmg 文件，按指示将其中的 app 拖入对应文件夹；
-3. **建议在运行前前往系统设置，在安全与隐私栏目授予 Raspberry 辅助功能权限。若弹出提示请求 AppleEvent 权限，请允许。**
+3. **建议在运行前前往系统设置，在安全与隐私栏目授予 Raspberry 辅助功能权限。若弹出提示请求 AppleEvent 权限，请允许；**
 3. 运行主程序，首次启动需等待其索引完成，即可使用。
 
 ## 使用说明
 
 本软件并无设置界面，如果在软件内部需要使用说明，可以前往“关于”菜单栏，即可看到指南窗口按钮，内附一份快速引导。
 
-1. 启动 Raspberry 应用，**初次启动会在程序坞中弹跳数次，这是正常现象，请勿人为关闭。弹跳时长视软件数量而定，长可达十数分钟，请耐心等待。
-2. 拖拽应用至分组面板，自定义分组名称。
-3. 可在设置中进行备份与恢复分组（付费版专享）。
-4. 按需切换语言。
+1. 启动 Raspberry 应用，**初次启动会在程序坞中弹跳数次，这是正常现象，请勿人为关闭。弹跳时长视软件数量而定，长可达十数分钟，请耐心等待。**
 
-双击不同区域对应不同功能效果：
+https://github.com/user-attachments/assets/1208f7f0-fa26-450b-a956-e17cc62c03d1
+
+2. 需注意：**双击不同区域对应不同功能效果：**
 
 <p align="center">
   <img src="https://i.imgur.com/ASvXDsJ.png" width=600 />
@@ -185,9 +184,12 @@ Raspberry 拥有简洁美观的界面设计，分组一目了然，操作流畅�
 
 ## 注意事项
 
-- 当前版本为初步开发版，部分功能仍在完善中。
 - 如果开启了开机自启选项，那么需要在关机的时候取消选择“在开机的时候打开上次打开的窗口”，因为这可能导致下次开机时同时打开两个 Raspberry 窗口。
 - 请定期备份分组数据，防止意外丢失。
+
+## Q&A
+
+如果遇到任何特殊情况，请访问 **[Q&A](https://github.com/Ryan-the-hito/Q-A)❓** 查看是否有现成的解决方案，或进一步[联系我](sweeter.02.implant@icloud.com)。
 
 ## 证书信息
 
@@ -195,11 +197,20 @@ Raspberry 拥有简洁美观的界面设计，分组一目了然，操作流畅�
 
 ## 特别致谢
 
+1. [Qt](https://github.com/qt)：本软件遵循 Qt 的开源协议；
+2. [blacktop/lporg: Organize Your macOS Launchpad Apps](https://github.com/blacktop/lporg): 本软件受惠于此 MIT 证书项目。
 感谢所有开源社区成员的支持与建议。
 
 ## 支持作者
 
-如果你喜欢 Raspberry，欢迎点 Star、Fork 或提交 Issue。也可通过 GitHub 关注作者，支持项目持续更新。
+如果你喜欢 Raspberry，欢迎点 Star 或提交 Issue。也可通过 GitHub 关注作者，支持项目持续更新。
+
+[Buy Me a Cup of Coffee](https://www.buymeacoffee.com/ryanthehito)
+
+<p align="center">
+  <img src="https://i.imgur.com/OHHJD4y.png" width=240 />
+  <img src="https://i.imgur.com/6XiKMAK.png" width=240 />
+</p>
 
 ## 待办功能
 

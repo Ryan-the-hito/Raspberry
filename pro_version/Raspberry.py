@@ -44,7 +44,7 @@ os.makedirs(ICON_CACHE_DIR, exist_ok=True)
 APP_PATHS_FILE = os.path.expanduser("~/.launchpad_app_paths.json")
 APP_ORDER_FILE = os.path.expanduser("~/.launchpad_app_order.json")
 MAIN_ORDER_FILE = os.path.expanduser("~/.launchpad_main_order.json")
-VERSION = "0.0.6"
+VERSION = "0.0.8"
 NAME = 'Raspberry Pro'
 
 os.environ["QT_QUICK_BACKEND"] = "metal"
@@ -2743,6 +2743,7 @@ class LaunchpadWindow(QWidget):
         self.show_main_action.triggered.connect(self.show_main_window)
         # 新增菜单项：关闭主界面
         self.close_main_action = QAction(self.tr("❌ Close the main interface"), self)
+        self.close_main_action.setShortcut("Ctrl+W")  # 新增：设置 Command+W 快捷键
         self.menu.addAction(self.close_main_action)
         self.close_main_action.triggered.connect(self.close_main_window)
 

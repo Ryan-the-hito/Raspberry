@@ -116,28 +116,40 @@ https://github.com/user-attachments/assets/e783b225-b88b-4d3e-8642-3202b0f5c1cd
 
 Raspberry 拥有简洁美观的界面设计，分组一目了然，操作流畅。分组与应用图标清晰呈现，支持快速查找和切换。
 
-![4jWmZEt](https://i.imgur.com/4jWmZEt.jpeg)
+主界面：
 
 ![fDQMlMu](https://i.imgur.com/fDQMlMu.jpeg)
 
+分组界面：
+
+![4jWmZEt](https://i.imgur.com/4jWmZEt.jpeg)
+
+菜单栏“操作”选项：
+
 ![VUsWFd1](https://i.imgur.com/VUsWFd1.png)
 
+菜单栏“关于”选项：
+
 ![DmbQqdR](https://i.imgur.com/DmbQqdR.png)
+
+菜单栏“语言”选项
 
 ![mjMMKoR](https://i.imgur.com/mjMMKoR.png)
 
 ## 环境要求
 
-- 操作系统：macOS Tahoe 及以上版本
-- Python 3.x 环境
+- 操作系统：macOS 15 及以上版本
+- 芯片为 M 系列芯片
 
 ## 类型价目
+
+免费版只有基本功能，付费版在基本功能之外，还拥有高级功能。
 
 |      | 免费版                      | 付费版                      |
 |------|-----------------------------|-----------------------------|
 | 基本功能 |1. 索引所有应用，支持自动更新新应用<br>2. 启动应用<br>3. 右键分组、添加、移除、重命名应用<br>4. 快捷键快速操作与排序 | 1. 索引所有应用，支持自动更新新应用<br>2. 启动应用<br>3. 右键分组、添加、移除、重命名应用<br>4. 快捷键快速操作与排序|
 | 高级功能 | 无 | 5. 导入原有 Launchpad 分组<br>6. 手动备份当前分组并恢复|
-| 价格 | 免费                        | $3      |
+| 价格 | 免费                        | $3 （2025 年 9 月 1 日 0 时前），此后将变为 $5    |
 | 获取 | [Github Releases](https://github.com/Ryan-the-hito/Raspberry/releases)  | [点击购买](https://www.buymeacoffee.com/ryanthehito) |
 
 购买与支付说明：
@@ -151,15 +163,19 @@ Raspberry 拥有简洁美观的界面设计，分组一目了然，操作流畅�
 
 ## 下载安装
 
-1. 前往 [GitHub 仓库](https://github.com/Ryan-the-hito/Raspberry) 下载最新版本。
-2. 解压安装包，按照说明运行主程序。
+1. 前往 [GitHub 仓库](https://github.com/Ryan-the-hito/Raspberry) 下载最新版本；
+2. 解压安装包，打开 dmg 文件，按指示将其中的 app 拖入对应文件夹；
+3. **建议在运行前前往系统设置，在安全与隐私栏目授予 Raspberry 辅助功能权限。若弹出提示请求 AppleEvent 权限，请允许。**
+3. 运行主程序，首次启动需等待其索引完成，即可使用。
 
 ## 使用说明
 
-1. 启动 Raspberry 应用。
+本软件并无设置界面，如果在软件内部需要使用说明，可以前往“关于”菜单栏，即可看到指南窗口按钮，内附一份快速引导。
+
+1. 启动 Raspberry 应用，**初次启动会在程序坞中弹跳数次，这是正常现象，请勿人为关闭。弹跳时长视软件数量而定，长可达十数分钟，请耐心等待。
 2. 拖拽应用至分组面板，自定义分组名称。
 3. 可在设置中进行备份与恢复分组（付费版专享）。
-4. 按需切换语言（开发中）。
+4. 按需切换语言。
 
 双击不同区域对应不同功能效果：
 

@@ -56,33 +56,49 @@ https://github.com/user-attachments/assets/db7b64ef-cf7a-4388-8944-2e09988c282e
 
 1. 空格键：聚焦与向右移动焦点
 
+https://github.com/user-attachments/assets/1f9132fe-fadc-4546-ba25-61e39bf4abf5
+
 空格键的效果是在没有聚焦的时候聚焦到当前界面上的第一个软件图标（如果聚焦在了搜索栏上，那么效果就是在搜索栏里键入空格了，因此此时需要先单击一下主界面取消选中搜索栏），并在当前聚焦了软件图标的时候，向右向下移动聚焦的软件。聚焦时软件周围会有一个蓝色边框。
 
 2. Shift+空格键：向左移动焦点
+
+https://github.com/user-attachments/assets/51c203c0-aabb-492f-b1c2-c2e58c7354a3
 
 如果按下 Shift+空格键，那么与空格键向右移动焦点的效果相反，焦点将向左移动。
 
 3. 左右键：翻页
 
+https://github.com/user-attachments/assets/7813bd5f-c71b-4171-aa5d-3e5075128d69
+
 键盘上的左右键可以用来在 Raspberry 里左右翻页，不管是在主界面上还是在分组内均是如此。
 
 4. Shift+左右键：左右更换排序
+
+https://github.com/user-attachments/assets/88fe9d73-cb61-4089-a64d-d3f4c5e2b703
 
 如果在当前**有聚焦**的前提下按下 Shift+左右键，那么当前的软件图标或是分组会和左或右侧的图标相互更换位置，可以连续按。适用于给软件自定义排序的情形。
 
 5. 上下键：上下移动焦点
 
+https://github.com/user-attachments/assets/d3466a4f-16c7-42a4-a476-dfe829f9c823
+
 如果想将焦点移动到某一行，除了连续使用空格键，还可以使用上下键移动焦点，更有效率。空格键始终向右移动焦点，因此移动到第二行需要按八次左右。而上下键在上下两行之间的同一列图标间移动焦点，只需一次即可将焦点换行。
 
 6. 回车键：打开软件与打开分组（左键单击）
+
+https://github.com/user-attachments/assets/169274b2-dbaa-40f4-b3ae-cde79a0ef8fb
 
 当焦点出现的时候按下回车键，就相当于左键单击这个焦点下的软件或者分组，这将打开这个软件或者打开这个分组。
 
 7. Shift+回车键：打开右键选项（右键单击）
 
+https://github.com/user-attachments/assets/09f8772c-4bd4-4e84-bc49-a8d5e2106320
+
 与回车键的左键单击效果对应，如果在 Shift 键按下的情况下按下回车，那么就相当于右键单击当前焦点下的软件或者分组。
 
 8. Tab 键
+
+https://github.com/user-attachments/assets/e783b225-b88b-4d3e-8642-3202b0f5c1cd
 
 当打开一个分组后，按下 Tab 键可以关闭当前分组并回到主界面。
 

@@ -195,7 +195,7 @@ Since the loading of the main interface elements of the software must be complet
 2. Note: **Double-clicking different areas corresponds to different functional effects:**
 
 <p align="center">
-<img src="https://i.imgur.com/ASvXDsJ.png" width=600 />
+<img src="https://i.imgur.com/udvmycy.png" width=600 />
 </p>
 
 3. If you click an option to let Raspberry clear the cache and re-index, do not click this button repeatedly and do not exit the application before the cache is completed.

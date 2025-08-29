@@ -24,7 +24,7 @@ https://github.com/user-attachments/assets/48e4dd4a-f630-4f49-9d56-ee80bacad3e1
 
 Raspberry focuses on this feature. As the author of Raspberry, I have over 700 softwares and 21 groups on my Mac. If I had to regroup each software again, what a massive project that would be! (Not to mention that before, Launchpad required dragging to group, which was even more difficult.)
 
-Therefore, Raspberry has added a migration feature in the paid version, which can save the user's Launchpad groups on the system before macOS 26 locally, and then restore them with one click after the user upgrades to macOS 26. (Note: **This feature requires purchasing and installing Raspberry's paid version before the upgrade and operating it correctly**.)
+Therefore, Raspberry has added a migration feature in the paid version, which can save the user's Launchpad groups on the system before macOS 26 locally, and then show them after the user upgrades to macOS 26. (Note: **This feature requires purchasing and installing Raspberry's paid version before the upgrade and operating it correctly**.)
 
 In addition, users can save their current grouping structure at any time, and can also return to any previous archive point at any time:
 

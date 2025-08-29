@@ -16,13 +16,13 @@ Starting from macOS 26, Launchpad will become a completely new app called "Apps.
 
 ### Auto-save Group and Sort Settings (all versions), import existing Launchpad groups, migration made easier, no worries about backup and recovery (exclusive for paid users)
 
-**Although many launcher software has manual grouping features, for users transferring from previous generations of macOS, migrating existing group information is a big headache.**
+**Although many launcher apps have manual grouping features, for users transferring from previous generations of macOS, migrating existing group information is a big headache.**
 
-Pay attention to the changes in the background in the following demonstration, where most of the software has almost instantly found their original combinations:
+Please pay attention to the changes in the background in the following demonstration, where most of the software has almost instantly found its original combinations:
 
 https://github.com/user-attachments/assets/48e4dd4a-f630-4f49-9d56-ee80bacad3e1
 
-Raspberry focuses on this feature. As the author of Raspberry, I have over 700 software and 21 groups on my Mac. If I had to regroup each software again, what a massive project that would be! (Not to mention that before, Launchpad required dragging to group, which was even more difficult.)
+Raspberry focuses on this feature. As the author of Raspberry, I have over 700 softwares and 21 groups on my Mac. If I had to regroup each software again, what a massive project that would be! (Not to mention that before, Launchpad required dragging to group, which was even more difficult.)
 
 Therefore, Raspberry has added a migration feature in the paid version, which can save the user's Launchpad groups on the system before macOS 26 locally, and then restore them with one click after the user upgrades to macOS 26. (Note: **This feature requires purchasing and installing Raspberry's paid version before the upgrade and operating it correctly**.)
 
@@ -32,7 +32,7 @@ https://github.com/user-attachments/assets/030cad24-007d-4323-98c9-90f302cabd41
 
 ### First launch automatically indexes all applications, supports automatic updates for new applications
 
-During the first launch, the Raspberry icon will flicker in the Dock bar for a while, which is a normal phenomenon because it is indexing the apps on the computer. This indexing is not based on Spotlight, so even if the system is updated, the index is saved locally and will not be lost. 
+During the first launch, the Raspberry icon will index all the apps on the computer. This indexing is not based on Spotlight, so even if the Spotlight index is removed, the index is saved locally and will not be lost. 
 
 After the indexing is completed, the first time you open the main interface will look like this:
 
@@ -40,9 +40,9 @@ https://github.com/user-attachments/assets/6097778f-b5f9-4b0a-8b89-98c0152532d1
 
 ### One-click Application Launch, Smooth Operation
 
-Like all startup software, a left-click on the icon of a certain software will open and run that software. If a group is clicked, the group will be opened.
+Like all startup softwares, a left-click on the icon of a certain software will open and run that software. If a group is clicked, the group will be opened.
 
-In addition to clicking, Raspberry has also added the double-click method, which can be used to exit the interface, rename by double-clicking, and so on.
+In addition to clicking, Raspberry has also added double-click to the interface, which can be used to exit the interface, rename by double-clicking, and so on.
 
 https://github.com/user-attachments/assets/efa1de8d-48ad-4aec-996f-f4d6dcd7bbd3
 
@@ -156,7 +156,7 @@ Purchase and Payment Instructions:
 
 To purchase this software, please follow the instructions below:
 
-1. Visit the (Buy me a coffee link)[https://www.buymeacoffee.com/ryanthehito/e/155171].
+1. Visit the [Buy me a coffee link](https://buymeacoffee.com/ryanthehito/e/451635).
 2. Fill in your name and email address in the provided fields.
 3. Choose your preferred payment method: bank card or link.
 4. Complete the payment process.
@@ -181,11 +181,9 @@ Thank you for your support and recognition of open-source paid software. As an i
 
 This software does not have a settings interface. If you need instructions within the software, you can go to the "About" menu bar, where you can see the guide window button, which includes a quick guide.
 
-1. Start the Raspberry application. **On the first launch, it will bounce several times in the dock, which is a normal phenomenon. Please do not manually close it. The bouncing duration depends on the number of software, and it can last up to several minutes. Please be patient. This phenomenon will not occur after normal use.**
+1. Start the Raspberry application. **On the first launch, it will index all icon caches of apps, and it can last up to several minutes. Please be patient and do not quit the app. This phenomenon will not occur after normal use.**
 
-https://github.com/user-attachments/assets/1208f7f0-fa26-450b-a956-e17cc62c03d1
-
-Since the loading of the main interface elements of the software must be completed in the main thread, it is not possible to silently establish an index in the background. However, as long as it is used normally, the established index will not disappear for no reason, so this situation will not occur again thereafter.
+![ZA8lpNn](https://i.imgur.com/ZA8lpNn.png)
 
 2. Note: **Double-clicking different areas corresponds to different functional effects:**
 
@@ -195,9 +193,16 @@ Since the loading of the main interface elements of the software must be complet
 
 3. If you click an option to let Raspberry clear the cache and re-index, do not click this button repeatedly and do not exit the application before the cache is completed.
 
+4. If you are going to transfer the layout from macOS 15 to macOS 26 (Tahoe), it is **highly recommended that you should not update your system before installing this app.** Instead, a user is expected to:
+
+- Installing and launching Raspberry on macOS 15;
+- Click "Back up Launchpad groups to Raspberry";
+- Update your system to macOS 26;
+- Start Raspberry and everything just looks familiar.
+
 ## Notice
 
-- If the startup option is enabled, it is necessary to uncheck "Open the last opened window at startup" when shutting down, as this may cause two Raspberry windows to open simultaneously when the computer starts up next time.
+- Updating apps: It's just like installing an app. A user has to choose "replace" instead of other options in this way to update it after downloading and opening a DMG file.
 - Please back up the group data regularly to prevent accidental loss.
 
 ## Q&A
@@ -247,7 +252,13 @@ If you like Raspberry, please click Star or submit an Issue. You can also follow
 
 - [x] Shortcut key to close the main interface
 
+- [ ] Add another simpler icon to app
+
 ## Versions
+
+### v0.0.9
+
+- An informational window has been implemented to display the Raspberry indexing application's cache upon initial execution.
 
 ### v0.0.8
 

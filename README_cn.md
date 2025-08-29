@@ -96,7 +96,7 @@ https://github.com/user-attachments/assets/09f8772c-4bd4-4e84-bc49-a8d5e2106320
 
 与回车键的左键单击效果对应，如果在 Shift 键按下的情况下按下回车，那么就相当于右键单击当前焦点下的软件或者分组。
 
-8. **Tab 键退出分组**
+8. **Tab 键退出分组, Command+W 关闭主窗口**
 
 https://github.com/user-attachments/assets/e783b225-b88b-4d3e-8642-3202b0f5c1cd
 

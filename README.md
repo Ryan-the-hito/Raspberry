@@ -96,7 +96,7 @@ https://github.com/user-attachments/assets/09f8772c-4bd4-4e84-bc49-a8d5e2106320
 
 Corresponding to the left-click effect of the Enter key, if the Enter key is pressed while the Shift key is pressed, it is equivalent to right-clicking on the software or group under the current focus.
 
-8. **Tab key to exit group**
+8. **Tab key to exit group, Command+W to close the main window**
 
 https://github.com/user-attachments/assets/e783b225-b88b-4d3e-8642-3202b0f5c1cd
 
@@ -193,9 +193,9 @@ This software does not have a settings interface. If you need instructions withi
 
 3. If you click an option to let Raspberry clear the cache and re-index, do not click this button repeatedly and do not exit the application before the cache is completed.
 
-4. If you are going to transfer the layout from macOS 15 to macOS 26 (Tahoe), it is **highly recommended that you should not update your system before installing this app.** Instead, a user is expected to:
+4. If you are going to transfer the layout from macOS 15 to macOS 26 (Tahoe), it is **highly recommended that you should not update your system before installing this app:**
 
-- Installing and launching Raspberry on macOS 15;
+- Install and launch Raspberry on macOS 15;
 - Click "Back up Launchpad groups to Raspberry";
 - Update your system to macOS 26;
 - Start Raspberry and everything just looks familiar.

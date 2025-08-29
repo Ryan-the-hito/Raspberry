@@ -3,14 +3,14 @@
 
 block_cipher = None
 
-__version__ = '0.0.8'
+__version__ = '0.0.9'
 
 info_plist = {
     'LSUIElement': False,
     #'LSBackgroundOnly': True,
     'NSHumanReadableCopyright': 'Copyright © 2025 Yixiang SHEN. All rights reserved.',
-    'CFBundleVersion': '8',
-    'CFBundleShortVersionString': '0.0.8',
+    'CFBundleVersion': '9',
+    'CFBundleShortVersionString': '0.0.9',
     "LSApplicationCategoryType": "public.app-category.productivity",
     "com.apple.security.app-sandbox": True,
     "NSPrincipalClass": "NSApplication",

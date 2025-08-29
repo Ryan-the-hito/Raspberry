@@ -14,7 +14,7 @@ import json
 import time
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QGridLayout, QPushButton, QLineEdit, QMenu, QLabel, QHBoxLayout, QSizePolicy, QMenuBar, QMessageBox, QFileDialog, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QDialog, QTextEdit, QToolButton
+    QApplication, QWidget, QVBoxLayout, QGridLayout, QPushButton, QLineEdit, QMenu, QLabel, QHBoxLayout, QSizePolicy, QMenuBar, QMessageBox, QFileDialog, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QDialog, QTextEdit, QToolButton, QProgressBar
 )
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QFont, QPalette, QColor, QGuiApplication, QPainterPath, QRegion, QMouseEvent, QTextOption, QFontMetrics, QLinearGradient, QPen, QBrush, QAction, QSurfaceFormat, QCursor
 from PyQt6.QtCore import Qt, QPropertyAnimation, QRect, pyqtSignal, QSize, QPoint, QRectF, QTimer, QThread, QEasingCurve, QParallelAnimationGroup, QAbstractAnimation, QEvent, QPointF, QCoreApplication, QElapsedTimer, QEventLoop, QTranslator, QLocale, QLibraryInfo
@@ -44,7 +44,7 @@ os.makedirs(ICON_CACHE_DIR, exist_ok=True)
 APP_PATHS_FILE = os.path.expanduser("~/.launchpad_app_paths.json")
 APP_ORDER_FILE = os.path.expanduser("~/.launchpad_app_order.json")
 MAIN_ORDER_FILE = os.path.expanduser("~/.launchpad_main_order.json")
-VERSION = "0.0.8"
+VERSION = "0.0.9"
 NAME = 'Raspberry Pro'
 
 os.environ["QT_QUICK_BACKEND"] = "metal"
@@ -641,6 +641,30 @@ def multiline_elide_with_firstline(text, font, max_width, max_lines=2):
         lines.append(text[idx:end].rstrip())
         idx = end
     return '\n'.join(lines)
+
+
+class AppIndexWorker(QThread):
+    finished = pyqtSignal(object)  # apps
+
+    def run(self):
+        apps = get_applications()
+        self.finished.emit(apps)
+
+
+class IndexingDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        self.setModal(True)
+        self.setFixedSize(340, 120)
+        layout = QVBoxLayout()
+        label = QLabel(self.tr("Raspberry is indexing applications, please wait and do not close this app. Raspberry will be ready after this window disappers."))
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)  # 无限进度条
+        layout.addWidget(self.progress)
+        self.setLayout(layout)
 
 
 class EmptyButton(QPushButton):
@@ -5270,19 +5294,27 @@ if __name__ == "__main__":
         lang = "system"  # 默认：跟随系统
     load_translation(app, lang)
 
-    apps = get_applications()
-    permission = PermissionInfoWidget()
-    permission.first_show_window()
-    win = LaunchpadWindow(apps)
-    win.setAutoFillBackground(True)
-    p = win.palette()
-    p.setColor(win.backgroundRole(), QColor('#ECECEC'))
-    win.setPalette(p)
-    win.hide()
-    app.setStyleSheet(style_sheet_ori)
+    win = None  # 全局主窗口变量
+
+    # Dock delegate 必须在主线程入口设置
+    if sys.platform == "darwin":
+        class _DockClickDelegate(NSObject):
+            def applicationShouldHandleReopen_hasVisibleWindows_(self, app, flag):
+                if win is not None:
+                    QTimer.singleShot(0, win.show_main_window)
+                return False
+        dock_delegate = _DockClickDelegate.alloc().init()
+        NSApp.setDelegate_(dock_delegate)
+
+    # 索引提示窗口
+    indexing_dialog = IndexingDialog()
+    indexing_dialog.show()
+    app.processEvents()  # 保证窗口及时显示
 
     def bring_main_window_to_front():
         pass
+        # if win is not None:
+        #     win.show_main_window()
         # win.showNormal()  # 如果窗口被最小化
         # win.raise_()  # 提到最前
         # win.activateWindow()  # 获取焦点
@@ -5292,21 +5324,21 @@ if __name__ == "__main__":
     _server.listen(SINGLETON)
     _server.newConnection.connect(lambda: bring_main_window_to_front())
 
-    # if sys.platform == "darwin":
-    #     listener = AppEventListener.alloc().initWithMainWindow_(win)
-    # def on_app_activated(state):
-    #     if state == Qt.ApplicationState.ApplicationActive:
-    #         # 这里调用你的主界面显示方法
-    #         win.show_main_window()
-    # app.applicationStateChanged.connect(on_app_activated)
-    class _DockClickDelegate(NSObject):
-        # selector: applicationShouldHandleReopen:hasVisibleWindows:
-        def applicationShouldHandleReopen_hasVisibleWindows_(self, app, flag):
-            # 仅当 Dock 图标被点（或 Finder 再次双击图标）时会进来
-            QTimer.singleShot(0, win.show_main_window)
-            # 返回 False 让 Qt 自己决定是否把其他窗口带到前台
-            return False
-    dock_delegate = _DockClickDelegate.alloc().init()
-    NSApp.setDelegate_(dock_delegate)
+    def on_index_finished(apps):
+        indexing_dialog.close()
+        permission = PermissionInfoWidget()
+        permission.first_show_window()
+        global win
+        win = LaunchpadWindow(apps)
+        win.setAutoFillBackground(True)
+        p = win.palette()
+        p.setColor(win.backgroundRole(), QColor('#ECECEC'))
+        win.setPalette(p)
+        win.hide()
+        app.setStyleSheet(style_sheet_ori)
+
+    index_worker = AppIndexWorker()
+    index_worker.finished.connect(on_index_finished)
+    index_worker.start()
     
     sys.exit(app.exec())

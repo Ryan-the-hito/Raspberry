@@ -44,6 +44,8 @@ Like all startup softwares, a left-click on the icon of a certain software will 
 
 In addition to clicking, Raspberry has also added double-click to the interface, which can be used to exit the interface, rename by double-clicking, and so on.
 
+The double-click function is quite an experimental feature after several weeks of testing. Feedbacks says they want a more traditional one just the same as the original Launchpad; thus, starting from v0.0.10, the original single-click way of interacting with the UI will replace the double-click way as the defult mode. If you prefer a double-click mode (which is more precise when controling the whole UI with only your keyboard), you may find a switch in the status menu on the top left side.
+
 https://github.com/user-attachments/assets/efa1de8d-48ad-4aec-996f-f4d6dcd7bbd3
 
 ### Right-click to group, add, remove, and rename applications, group management is efficient and convenient
@@ -185,7 +187,7 @@ This software does not have a settings interface. If you need instructions withi
 
 ![ZA8lpNn](https://i.imgur.com/ZA8lpNn.png)
 
-2. Note: **Double-clicking different areas corresponds to different functional effects:**
+2. Note: **[⚠️⚠️⚠️Not in tradional mode]Double-clicking different areas corresponds to different functional effects:**
 
 <p align="center">
 <img src="https://i.imgur.com/udvmycy.png" width=600 />
@@ -199,6 +201,8 @@ This software does not have a settings interface. If you need instructions withi
 - Click "Back up Launchpad groups to Raspberry";
 - Update your system to macOS 26;
 - Start Raspberry and everything just looks familiar.
+
+5. **⚠️⚠️⚠️If you want to fix potential issues, please go to the upper left corner of the menu bar after updating the software, select the "🗑 Reset all data and restart" option, and then perform another backup operation. This way, the backup can be carried out smoothly.**
 
 ## Notice
 

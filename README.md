@@ -202,7 +202,11 @@ This software does not have a settings interface. If you need instructions withi
 - Update your system to macOS 26;
 - Start Raspberry and everything just looks familiar.
 
-5. **⚠️⚠️⚠️If you want to fix potential issues, please go to the upper left corner of the menu bar after updating the software, select the "🗑 Reset all data and restart" option, and then perform another backup operation. This way, the backup can be carried out smoothly.**
+5. **⚠️⚠️⚠️If you want to fix potential issues, please go to the upper left corner of the menu bar after updating the software, select the "🗑 Reset all data and restart" option, and then perform another backup operation. This way, the backup can be carried out smoothly.**Plwease follow these instructions:
+   FIrst, please check GitHub page (free) or your email (paid) for the latest dmg files.
+   Second, install the latest app, open the dmg and drag it to the Application folder to replace the older one.
+   Third, launch Raspberry app and go to the upper left corner of the menu bar, select the "🗑 Reset all data and restart” option.
+   Last, perform another backup operation. This way, the backup should be carried out smoothly.
 
 ## Notice
 

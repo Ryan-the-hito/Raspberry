@@ -260,6 +260,20 @@ If you like Raspberry, please click Star or submit an Issue. You can also follow
 
 ## Versions
 
+### v0.0.11
+
+1. Added an option to clear various caches. When the app encounters functional issues, such as when users previously reported that they were unable to back up, use this option to reset the environment.
+2. Fixed the issue of software duplication caused by software grouping in the search state.
+3. Fixed the issue of apps not being updated in a timely manner when deleted from the grouping page.
+4. Fixed the issue of not being able to generate the main order control file in the initial state.
+5. Fixed the issue of the incorrectly generated main order control file blocking the backup function.
+
+### v0.0.10
+
+1. The issue of only being able to access the first page of folders when restoring the old Launchpad.（Pro version）
+2. A traditional click mode has been added to the overall design, which is enabled by default and has the same interaction as Launchpad. Just click and click, no need for users to double-click here and there.
+3. A gradient exit animation has been added to the process of the main interface disappearing.
+
 ### v0.0.9
 
 - An informational window has been implemented to display the Raspberry indexing application's cache upon initial execution.

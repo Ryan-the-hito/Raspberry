@@ -42,7 +42,7 @@ os.makedirs(ICON_CACHE_DIR, exist_ok=True)
 APP_PATHS_FILE = os.path.expanduser("~/.launchpad_app_paths.json")
 APP_ORDER_FILE = os.path.expanduser("~/.launchpad_app_order.json")
 MAIN_ORDER_FILE = os.path.expanduser("~/.launchpad_main_order.json")
-VERSION = "0.0.10"
+VERSION = "0.0.11"
 NAME = 'Raspberry'
 
 os.environ["QT_QUICK_BACKEND"] = "metal"
@@ -2648,6 +2648,9 @@ class LaunchpadWindow(QWidget):
 
         self.menu.addSeparator()
 
+        self.reset_all_action = QAction(self.tr("🗑 Reset All Data and Restart"), self)
+        self.menu.addAction(self.reset_all_action)
+        self.reset_all_action.triggered.connect(self.reset_all_data_and_restart)
         # 新增菜单项：更新指定App图标缓存
         self.update_single_app_icon_action = QAction("❇️ Update the specified app icon cache", self)
         self.menu.addAction(self.update_single_app_icon_action)
@@ -2898,6 +2901,11 @@ class LaunchpadWindow(QWidget):
         self.display_apps(self.filtered_apps, self.current_page)
 
     def combine_app_to_group(self, app_btn, group):
+        # 先从所有分组移除该 app，防止重复
+        for g in self.groups:
+            if app_btn.app_info in g['apps']:
+                g['apps'].remove(app_btn.app_info)
+                g['icon'] = create_group_icon(g['apps'])
         if group is None:
             group = {'name': 'New Group', 'apps': [app_btn.app_info], 'icon': create_group_icon([app_btn.app_info])}
             self.groups.append(group)
@@ -2924,6 +2932,9 @@ class LaunchpadWindow(QWidget):
         self.filtered_apps = [a for a in self.apps if not any(a in g['apps'] for g in self.groups)]
         self.display_apps(self.filtered_apps, self.current_page)
         self.save_current_order()
+        is_searching = bool(self.main_content.search_bar.text().strip())
+        if is_searching:
+            self.main_content.search_bar.setText('')
 
     def move_app_to_group(self, app_btn, target_group):
         # 只允许从组内移动到其他组
@@ -3084,6 +3095,10 @@ class LaunchpadWindow(QWidget):
         save_groups(self.groups)
         self.save_current_order()
         self.display_apps(self.filtered_apps, self.current_page)
+        # 如果组窗口还开着，刷新组窗口
+        if self.group_widget:
+            # 只刷新当前显示的组
+            self.group_widget.display_apps(self.group_widget.group['apps'], self.group_widget.current_page)
 
     # def disband_group(self, group):
     #     # 1. 找到 group 在 main_order 的索引
@@ -3171,6 +3186,12 @@ class LaunchpadWindow(QWidget):
     def on_new_apps_found(self, result):
         new_apps = result.get('new_apps', [])
         all_paths = set(result.get('all_paths', []))
+        # 新增：首次初始化 main_order
+        if not self.main_order:
+            # 先加所有分组
+            self.main_order = [('group', g) for g in self.groups]
+            # 再加所有未分组 app
+            self.main_order += [('app', a) for a in self.apps if not any(a in g['apps'] for g in self.groups)]
         if new_apps:
             self.apps.extend(new_apps)
             self.apps = self.dedup_apps(self.apps)
@@ -3178,10 +3199,13 @@ class LaunchpadWindow(QWidget):
             for a in new_apps:
                 # 只加未分组的 app
                 if not any(a in g['apps'] for g in self.groups):
-                    already_in = any((typ == 'app' and obj['path'] == a['path']) for typ, obj in self.main_order)
-                    if not already_in:
+                    already_in_main = any((typ == 'app' and obj['path'] == a['path']) for typ, obj in self.main_order)
+                    if not already_in_main:
                         self.main_order.append(('app', a))
-            self.save_current_order()
+                    # 新增：加入 filtered_apps
+                    already_in_filtered = any(a['path'] == fa['path'] for fa in self.filtered_apps)
+                    if not already_in_filtered:
+                        self.filtered_apps.append(a)
         # 检查已删除的 app
         current_paths = set(a['path'] for a in self.apps)
         removed_paths = current_paths - all_paths
@@ -3214,8 +3238,9 @@ class LaunchpadWindow(QWidget):
                 (typ, obj) for (typ, obj) in self.main_order
                 if not (typ == 'app' and obj['path'] in removed_paths)
             ]
-            self.save_current_order()
+            # self.save_current_order()
         save_app_order([a['path'] for a in self.filtered_apps])  # save again
+        self.save_current_order()
         self.display_apps(self.filtered_apps, self.current_page)
 
     # def keyPressEvent(self, event):
@@ -3471,6 +3496,7 @@ class LaunchpadWindow(QWidget):
         self.prepare_icons_for_animation()
         self.hide_dock()
         QTimer.singleShot(10, self.animate_icons_in)  # 动画延迟触发
+        QTimer.singleShot(2000, self.start_background_scan)  # 新增：主UI展示后2秒再扫描一次
 
     def close_main_window(self):
         if not self.isVisible():
@@ -4016,6 +4042,23 @@ class LaunchpadWindow(QWidget):
     def toggle_traditional_mode(self):
         self.traditional_mode = self.traditional_mode_action.isChecked()
         self.write_traditional_mode(self.traditional_mode)
+
+    def reset_all_data_and_restart(self):
+        # 需要删除的文件列表
+        files_to_delete = [
+            os.path.expanduser("~/.launchpad_main_order.json"),
+            os.path.expanduser("~/.launchpad_groups.json"),
+            os.path.expanduser("~/.launchpad_app_paths.json"),
+            os.path.expanduser("~/.launchpad_app_order.json"),
+        ]
+        for f in files_to_delete:
+            try:
+                if os.path.exists(f):
+                    os.remove(f)
+            except Exception as e:
+                print(f"Failed to delete {f}: {e}")
+        # 重启应用
+        self.restart_app()
 
 
 class WindowAbout(QWidget):  # 增加说明页面(About)

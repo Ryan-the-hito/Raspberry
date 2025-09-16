@@ -44,7 +44,7 @@ os.makedirs(ICON_CACHE_DIR, exist_ok=True)
 APP_PATHS_FILE = os.path.expanduser("~/.launchpad_app_paths.json")
 APP_ORDER_FILE = os.path.expanduser("~/.launchpad_app_order.json")
 MAIN_ORDER_FILE = os.path.expanduser("~/.launchpad_main_order.json")
-VERSION = "0.0.9"
+VERSION = "0.0.10"
 NAME = 'Raspberry Pro'
 
 os.environ["QT_QUICK_BACKEND"] = "metal"
@@ -676,6 +676,14 @@ class EmptyButton(QPushButton):
         self.setEnabled(True)                  # 必须能接收事件
         # 和背景一致：完全透明
         self.setStyleSheet("background: transparent; border: none;")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.main_window:
+            # 只在传统模式下单击关闭
+            if hasattr(self.main_window, "traditional_mode") and self.main_window.traditional_mode:
+                self.main_window.close_main_window()
+                return
+        super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         # 双击占位按钮 → 关闭主界面
@@ -2773,6 +2781,21 @@ class LaunchpadWindow(QWidget):
 
         self.menu.addSeparator()
 
+        # 沙盒路径
+        traditional_mode_dir = os.path.join(base_dir, "RaspberryAppPath")
+        os.makedirs(traditional_mode_dir, exist_ok=True)
+        self.TRADITIONAL_MODE_FILE = os.path.join(traditional_mode_dir, "TraditionalMode.txt")
+
+        # 在菜单栏添加传统模式选项
+        self.traditional_mode = self.read_traditional_mode()
+        self.traditional_mode_action = QAction(self.tr("🕹 Traditional Mode (Click blank to close)"), self)
+        self.traditional_mode_action.setCheckable(True)
+        self.traditional_mode_action.setChecked(self.traditional_mode)
+        self.traditional_mode_action.triggered.connect(self.toggle_traditional_mode)
+        self.menu.addAction(self.traditional_mode_action)
+
+        self.menu.addSeparator()
+
         # 新增菜单项：更新指定App图标缓存
         self.update_single_app_icon_action = QAction(self.tr("❇️ Update the specified app icon cache"), self)
         self.menu.addAction(self.update_single_app_icon_action)
@@ -2870,8 +2893,34 @@ class LaunchpadWindow(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self._mouse_press_pos = event.position()
-            self._mouse_move_pos = event.position()
+            # 组窗口显示时，点击组窗口外部关闭组窗口
+            if self.group_widget and self.group_widget.isVisible():
+                if self.traditional_mode:
+                    group_geo = self.group_widget.geometry()
+                    if not group_geo.contains(event.position().toPoint()):
+                        self.close_group_widget()
+                        return
+            else:
+                if self.traditional_mode:
+                    pos = event.position().toPoint()
+                    widget = self.childAt(pos)
+                    # 判断是否在 grid_widget 区域
+                    if widget == self.main_content.grid_widget:
+                        # 再判断是否在 grid_widget 的空白区域
+                        local_pos = self.main_content.grid_widget.mapFromParent(pos)
+                        child = self.main_content.grid_widget.childAt(local_pos)
+                        # 如果不是在任何按钮上
+                        if child is None:
+                            self.close_main_window()
+                            return
+                    # 如果直接点到 EmptyButton
+                    elif isinstance(widget, EmptyButton):
+                        self.close_main_window()
+                        return
+                    # 如果点到主窗口其它空白区域
+                    elif widget is None:
+                        self.close_main_window()
+                        return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -3545,16 +3594,22 @@ class LaunchpadWindow(QWidget):
         QTimer.singleShot(10, self.animate_icons_in)  # 动画延迟触发
 
     def close_main_window(self):
-        if self.isVisible():
-            self.hide()
+        if not self.isVisible():
+            return
+        # 防止重复动画
+        if hasattr(self, "_fade_anim") and self._fade_anim is not None and self._fade_anim.state() == QPropertyAnimation.State.Running:
+            return
+        self._fade_anim = QPropertyAnimation(self, b"windowOpacity")
+        self._fade_anim.setDuration(350)  # 动画时长（毫秒）
+        self._fade_anim.setStartValue(self.windowOpacity())
+        self._fade_anim.setEndValue(0.0)
+        self._fade_anim.finished.connect(self._after_fade_out)
+        self._fade_anim.start()
 
-    # def closeEvent(self, event):
-    #     #print('event')
-    #     self.initial_release = False
-    #     if self._dock_was_hidden_by_me:
-    #         self.show_dock()
-    #         self._dock_was_hidden_by_me = False
-    #     super().closeEvent(event)
+    def _after_fade_out(self):
+        self.hide()
+        self.setWindowOpacity(1.0)  # 恢复透明度，便于下次show
+        self._fade_anim = None
 
     def hideEvent(self, event):
         if self._always_hide_dock == False:
@@ -3996,20 +4051,22 @@ class LaunchpadWindow(QWidget):
         all_paths = json.loads(match_json_data)
 
         result = []
-        for folder_entry in apps_pages[0]['items']:
-            # 只处理有 'folder' 键的字典
-            if isinstance(folder_entry, dict) and 'folder' in folder_entry:
-                folder_name = folder_entry['folder']
-                app_set = set()
-                for page in folder_entry.get('pages', []):
-                    for item in page.get('items', []):
-                        matches = self.find_matching_paths(item, all_paths)
-                        app_set.update(matches)
-                result.append({
-                    "name": folder_name,
-                    "apps": sorted(app_set)
-                })
-            # 如果不是 folder 字典，直接跳过
+        # 修改：遍历所有 page
+        for page in apps_pages:
+            for folder_entry in page['items']:
+                # 只处理有 'folder' 键的字典
+                if isinstance(folder_entry, dict) and 'folder' in folder_entry:
+                    folder_name = folder_entry['folder']
+                    app_set = set()
+                    for subpage in folder_entry.get('pages', []):
+                        for item in subpage.get('items', []):
+                            matches = self.find_matching_paths(item, all_paths)
+                            app_set.update(matches)
+                    result.append({
+                        "name": folder_name,
+                        "apps": sorted(app_set)
+                    })
+                # 如果不是 folder 字典，直接跳过
         return result
 
     def reload_groups(self):
@@ -4303,6 +4360,30 @@ class LaunchpadWindow(QWidget):
         msg = RestartMessageBox(self.tr("Language will apply after restart."),
                                parent=self, buttons=(self.tr("OK"),))
         msg.exec()
+
+    def read_traditional_mode(self):
+        if not os.path.exists(self.TRADITIONAL_MODE_FILE):
+            # 默认开启
+            with open(self.TRADITIONAL_MODE_FILE, "w", encoding="utf-8") as f:
+                f.write("1")
+            return True
+        try:
+            with open(self.TRADITIONAL_MODE_FILE, "r", encoding="utf-8") as f:
+                val = f.read().strip()
+                return val == "1"
+        except Exception:
+            return True  # 读取失败也默认开启
+
+    def write_traditional_mode(self, enabled: bool):
+        try:
+            with open(self.TRADITIONAL_MODE_FILE, "w", encoding="utf-8") as f:
+                f.write("1" if enabled else "0")
+        except Exception:
+            pass
+
+    def toggle_traditional_mode(self):
+        self.traditional_mode = self.traditional_mode_action.isChecked()
+        self.write_traditional_mode(self.traditional_mode)
 
 
 class WindowAbout(QWidget):  # 增加说明页面(About)

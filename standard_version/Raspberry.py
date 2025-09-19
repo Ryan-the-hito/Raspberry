@@ -42,7 +42,7 @@ os.makedirs(ICON_CACHE_DIR, exist_ok=True)
 APP_PATHS_FILE = os.path.expanduser("~/.launchpad_app_paths.json")
 APP_ORDER_FILE = os.path.expanduser("~/.launchpad_app_order.json")
 MAIN_ORDER_FILE = os.path.expanduser("~/.launchpad_main_order.json")
-VERSION = "0.0.11"
+VERSION = "0.0.12"
 NAME = 'Raspberry'
 
 os.environ["QT_QUICK_BACKEND"] = "metal"
@@ -2271,6 +2271,9 @@ class GroupWidget(QWidget):
         return super().eventFilter(obj, event)
 
     def handle_key_event(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.close_group_widget()
+            return True
         if event.key() == Qt.Key.Key_Left:
             if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                 self.move_focused_btn_left()
@@ -2332,6 +2335,23 @@ class GroupWidget(QWidget):
         return False
 
     def wheelEvent(self, event):
+        # 节流：300ms 内只允许翻一次
+        if not hasattr(self, '_wheel_timer'):
+            self._wheel_timer = QElapsedTimer()
+            self._wheel_timer.start()
+        if self._wheel_timer.isValid() and self._wheel_timer.elapsed() < 300:
+            return
+        self._wheel_timer.restart()
+
+        delta_y = event.angleDelta().y()
+        if delta_y > 0:
+            # 向上滚动，翻到上一页（往左）
+            self.goto_page(max(self.current_page - 1, 0))
+        elif delta_y < 0:
+            # 向下滚动，翻到下一页（往右）
+            total_pages = max(1, (len(self.group['apps']) + self.items_per_page - 1) // self.items_per_page)
+            self.goto_page(min(self.current_page + 1, total_pages - 1))
+
         delta_x = event.angleDelta().x()
         if delta_x == 0:
             return
@@ -2663,10 +2683,31 @@ class LaunchpadWindow(QWidget):
         self.menu.addSeparator()
 
         # 新增菜单项：始终隐藏dock
-        self.always_hide_dock_action = QAction("🌀 Always hide Dock", self)
+        self.always_hide_dock_action = QAction(self.tr("🌀 Always hide Dock"), self)
         self.menu.addAction(self.always_hide_dock_action)
         self.always_hide_dock_action.setCheckable(True)
         self.always_hide_dock_action.triggered.connect(self.always_hide_dock)
+        self._always_hide_dock_file = os.path.expanduser("~/.raspberry_hide_dock")
+        self._always_hide_dock = self.read_always_hide_dock_setting()
+        self.always_hide_dock_action.setChecked(self._always_hide_dock)
+        # 新增 Show Dock 开关
+        self.show_dock_action = QAction(self.tr("🪟 Always show Dock"), self)
+        self.show_dock_action.setCheckable(True)
+        self.show_dock_action.setChecked(False)  # 默认不勾选
+        self.show_dock_action.triggered.connect(self.toggle_show_dock)
+        self.menu.addAction(self.show_dock_action)
+        self._show_dock_file = os.path.expanduser("~/.raspberry_show_dock")
+        self._force_show_dock = self.read_show_dock_setting()
+        if self.read_show_dock_setting() == True:
+            self.show_dock_action.setChecked(True)
+        else:
+            self.show_dock_action.setChecked(False)
+        # 保证互斥
+        if self._force_show_dock and self._always_hide_dock:
+            # 默认优先 show
+            self._always_hide_dock = False
+            self.always_hide_dock_action.setChecked(False)
+            self.write_always_hide_dock_setting(False)
         # login
         self.action10 = QAction("🛠️ Start on login")
         self.action10.setCheckable(True)
@@ -2720,8 +2761,6 @@ class LaunchpadWindow(QWidget):
 
         self.clear_cache_worker = None
 
-        self._always_hide_dock = False
-
         # 滑动翻页
         self._cooldown = False
         self._gesture_timer = QElapsedTimer()
@@ -2744,27 +2783,45 @@ class LaunchpadWindow(QWidget):
                     if not group_geo.contains(event.position().toPoint()):
                         self.close_group_widget()
                         return
+            # else:
+            #     if self.traditional_mode:
+            #         pos = event.position().toPoint()
+            #         widget = self.childAt(pos)
+            #         # 判断是否在 grid_widget 区域
+            #         if widget == self.main_content.grid_widget:
+            #             # 再判断是否在 grid_widget 的空白区域
+            #             local_pos = self.main_content.grid_widget.mapFromParent(pos)
+            #             child = self.main_content.grid_widget.childAt(local_pos)
+            #             # 如果不是在任何按钮上
+            #             if child is None:
+            #                 self.close_main_window()
+            #                 return
+            #         # 如果直接点到 EmptyButton
+            #         elif isinstance(widget, EmptyButton):
+            #             self.close_main_window()
+            #             return
+            #         # 如果点到主窗口其它空白区域
+            #         elif widget is None:
+            #             self.close_main_window()
+            #             return
             else:
                 if self.traditional_mode:
                     pos = event.position().toPoint()
-                    widget = self.childAt(pos)
                     # 判断是否在 grid_widget 区域
-                    if widget == self.main_content.grid_widget:
-                        # 再判断是否在 grid_widget 的空白区域
+                    grid_rect = self.main_content.grid_widget.geometry()
+                    # 注意 grid_widget 的坐标是相对于 parent 的
+                    grid_top_left = self.main_content.grid_widget.mapTo(self, QPoint(0, 0))
+                    grid_rect_global = QRect(grid_top_left, self.main_content.grid_widget.size())
+                    if not grid_rect_global.contains(pos):
+                        self.close_main_window()
+                        return
+                    else:
+                        # 在 grid_widget 区域内，再判断是否点到空白
                         local_pos = self.main_content.grid_widget.mapFromParent(pos)
                         child = self.main_content.grid_widget.childAt(local_pos)
-                        # 如果不是在任何按钮上
-                        if child is None:
+                        if child is None or isinstance(child, EmptyButton):
                             self.close_main_window()
                             return
-                    # 如果直接点到 EmptyButton
-                    elif isinstance(widget, EmptyButton):
-                        self.close_main_window()
-                        return
-                    # 如果点到主窗口其它空白区域
-                    elif widget is None:
-                        self.close_main_window()
-                        return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -3371,6 +3428,9 @@ class LaunchpadWindow(QWidget):
         return super().eventFilter(obj, event)
 
     def handle_key_event(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.close_main_window()
+            return True
         if event.key() == Qt.Key.Key_Left:
             if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                 self.move_focused_btn_left()
@@ -3494,7 +3554,10 @@ class LaunchpadWindow(QWidget):
         super().showEvent(event)
         self.adapt_to_screen()  # 每次 show 都刷新几何
         self.prepare_icons_for_animation()
-        self.hide_dock()
+        if getattr(self, '_force_show_dock', False):
+            self.show_dock()
+        else:
+            self.hide_dock()
         QTimer.singleShot(10, self.animate_icons_in)  # 动画延迟触发
         QTimer.singleShot(2000, self.start_background_scan)  # 新增：主UI展示后2秒再扫描一次
 
@@ -3596,10 +3659,13 @@ class LaunchpadWindow(QWidget):
                     #QMessageBox.information(self, "提示", f"已缓存 {name} 的图标，但该App不在主界面列表中。")
 
     def always_hide_dock(self):
-        if self.always_hide_dock_action.isChecked():
-            self._always_hide_dock = True
-        if not self.always_hide_dock_action.isChecked():
-            self._always_hide_dock = False
+        self._always_hide_dock = self.always_hide_dock_action.isChecked()
+        self.write_always_hide_dock_setting(self._always_hide_dock)
+        if self._always_hide_dock:
+            # 互斥：取消 always show
+            self._force_show_dock = False
+            self.show_dock_action.setChecked(False)
+            self.write_show_dock_setting(False)
 
     # def is_dock_hidden(self):
     #     try:
@@ -3623,38 +3689,45 @@ class LaunchpadWindow(QWidget):
     #         return False
 
     def hide_dock(self):
+        if getattr(self, '_force_show_dock', False):
+            return  # 如果强制显示 Dock，则不执行
         try:
-            # AppleScript命令
             toggle_dock_script = '''
                 tell application "System Events" to set the autohide of dock preferences to true
-                '''
-            # 运行AppleScript
+            '''
             subprocess.run(["osascript", "-e", toggle_dock_script])
-            # subprocess.run(
-            #     ["defaults", "write", "com.apple.dock", "autohide", "-bool", "true"], check=True
-            # )
-            # subprocess.run(["killall", "Dock"], check=True)
         except Exception as e:
             pass
-            # print(f"隐藏 Dock 失败: {e}")
 
     def show_dock(self):
+        # if getattr(self, '_force_show_dock', False):
+        #     return  # 如果强制显示 Dock，则不执行
         try:
-            # AppleScript命令
             toggle_dock_script = '''
                 tell application "System Events" to set the autohide of dock preferences to false
-                '''
-            # 运行AppleScript
+            '''
             subprocess.run(["osascript", "-e", toggle_dock_script])
-            # subprocess.run(
-            #     ["defaults", "write", "com.apple.dock", "autohide", "-bool", "false"], check=True
-            # )
-            # subprocess.run(["killall", "Dock"], check=True)
         except Exception as e:
             pass
-            # print(f"显示 Dock 失败: {e}")
 
     def wheelEvent(self, event):
+        # 节流：300ms 内只允许翻一次
+        if not hasattr(self, '_wheel_timer'):
+            self._wheel_timer = QElapsedTimer()
+            self._wheel_timer.start()
+        if self._wheel_timer.isValid() and self._wheel_timer.elapsed() < 300:
+            return
+        self._wheel_timer.restart()
+
+        # 鼠标滚轮上下滚动时翻页
+        delta_y = event.angleDelta().y()
+        if delta_y > 0:
+            # 向上滚动，翻到上一页（往左）
+            self.goto_page(max(self.current_page - 1, 0))
+        elif delta_y < 0:
+            # 向下滚动，翻到下一页（往右）
+            self.goto_page(min(self.current_page + 1, self.total_pages() - 1))
+
         delta_x = event.angleDelta().x()
         if delta_x == 0:
             return
@@ -4059,6 +4132,53 @@ class LaunchpadWindow(QWidget):
                 print(f"Failed to delete {f}: {e}")
         # 重启应用
         self.restart_app()
+
+    def toggle_show_dock(self):
+        self._force_show_dock = self.show_dock_action.isChecked()
+        self.write_show_dock_setting(self._force_show_dock)
+        if self._force_show_dock:
+            # 互斥：取消 always hide
+            self._always_hide_dock = False
+            self.always_hide_dock_action.setChecked(False)
+            self.write_always_hide_dock_setting(False)
+            self.show_dock()
+        else:
+            if self.isVisible():
+                self.hide_dock()
+
+    def read_show_dock_setting(self):
+        try:
+            if os.path.exists(self._show_dock_file):
+                with open(self._show_dock_file, "r", encoding="utf-8") as f:
+                    val = f.read().strip()
+                    return val == "1"
+        except Exception:
+            pass
+        return False  # 默认不勾选
+
+    def write_show_dock_setting(self, enabled: bool):
+        try:
+            with open(self._show_dock_file, "w", encoding="utf-8") as f:
+                f.write("1" if enabled else "0")
+        except Exception:
+            pass
+
+    def read_always_hide_dock_setting(self):
+        try:
+            if os.path.exists(self._always_hide_dock_file):
+                with open(self._always_hide_dock_file, "r", encoding="utf-8") as f:
+                    val = f.read().strip()
+                    return val == "1"
+        except Exception:
+            pass
+        return False  # 默认不勾选
+
+    def write_always_hide_dock_setting(self, enabled: bool):
+        try:
+            with open(self._always_hide_dock_file, "w", encoding="utf-8") as f:
+                f.write("1" if enabled else "0")
+        except Exception:
+            pass
 
 
 class WindowAbout(QWidget):  # 增加说明页面(About)
@@ -4650,7 +4770,7 @@ class WindowUpdate(QWidget):  # 增加更新页面（Check for Updates）
 
     def init_ui(self):
         self.setUpMainWindow()
-        self.setFixedSize(280, 170)
+        self.setFixedSize(280, 220)
         self.center()
         self.setFocus()
 
@@ -4698,6 +4818,9 @@ class WindowUpdate(QWidget):  # 增加更新页面（Check for Updates）
         self.close_button.move(10, 10)
         self.close_button.clicked.connect(self.close)
 
+        title = QLabel(self.tr("<h2>Raspberry Update</h2>"))
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
         widg5 = QWidget()
         lbl1 = QLabel('Latest version:', self)
         self.lbl2 = QLabel('', self)
@@ -4733,8 +4856,10 @@ class WindowUpdate(QWidget):  # 增加更新页面（Check for Updates）
 
         main_h_box = QVBoxLayout()
         main_h_box.setContentsMargins(20, 40, 20, 20)  # 重要，用来保证关闭按钮的位置。
+        main_h_box.addWidget(title)
+        main_h_box.addSpacing(5)
         main_h_box.addWidget(widg5)
-        main_h_box.addSpacing(10)
+        main_h_box.addSpacing(5)
         main_h_box.addWidget(widg3)
         main_h_box.addWidget(widg4)
         self.setLayout(main_h_box)
@@ -5050,7 +5175,10 @@ if __name__ == "__main__":
         class _DockClickDelegate(NSObject):
             def applicationShouldHandleReopen_hasVisibleWindows_(self, app, flag):
                 if win is not None:
-                    QTimer.singleShot(0, win.show_main_window)
+                    if win.isVisible():
+                        QTimer.singleShot(0, win.close_main_window)
+                    else:
+                        QTimer.singleShot(0, win.show_main_window)
                 return False
         dock_delegate = _DockClickDelegate.alloc().init()
         NSApp.setDelegate_(dock_delegate)

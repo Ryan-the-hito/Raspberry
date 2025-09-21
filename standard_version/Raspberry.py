@@ -12,7 +12,7 @@ import json
 import time
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QGridLayout, QPushButton, QLineEdit, QMenu, QLabel, QHBoxLayout, QSizePolicy, QMenuBar, QMessageBox, QFileDialog, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QDialog, QTextEdit, QToolButton, QProgressBar
+    QApplication, QWidget, QVBoxLayout, QGridLayout, QPushButton, QLineEdit, QMenu, QLabel, QHBoxLayout, QSizePolicy, QMenuBar, QMessageBox, QFileDialog, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QDialog, QTextEdit, QToolButton, QProgressBar, QWidgetAction, QSlider
 )
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QFont, QPalette, QColor, QGuiApplication, QPainterPath, QRegion, QMouseEvent, QTextOption, QFontMetrics, QLinearGradient, QPen, QBrush, QAction, QSurfaceFormat, QCursor
 from PyQt6.QtCore import Qt, QPropertyAnimation, QRect, pyqtSignal, QSize, QPoint, QRectF, QTimer, QThread, QEasingCurve, QParallelAnimationGroup, QAbstractAnimation, QEvent, QPointF, QCoreApplication, QElapsedTimer, QEventLoop, pyqtSlot
@@ -43,7 +43,7 @@ os.makedirs(ICON_CACHE_DIR, exist_ok=True)
 APP_PATHS_FILE = os.path.expanduser("~/.launchpad_app_paths.json")
 APP_ORDER_FILE = os.path.expanduser("~/.launchpad_app_order.json")
 MAIN_ORDER_FILE = os.path.expanduser("~/.launchpad_main_order.json")
-VERSION = "0.0.14"
+VERSION = "0.0.15"
 NAME = 'Raspberry'
 
 os.environ["QT_QUICK_BACKEND"] = "metal"
@@ -2109,6 +2109,14 @@ class GroupWidget(QWidget):
         self._reset_scroll_timer.setSingleShot(True)
         self._reset_scroll_timer.timeout.connect(self._reset_scroll)
 
+        # GroupWidget __init__ 新增
+        self._touchpad_swipe_active = False
+        self._touchpad_swipe_accum = 0
+        self._touchpad_swipe_btns = []
+        self._touchpad_swipe_anim = None
+        self._touchpad_swipe_direction = None
+        self._touchpad_swipe_timer = None
+
     def display_apps(self, apps, page=0):
         for w in self.grid_widget.findChildren(QWidget):
             w.setParent(None)
@@ -2393,46 +2401,140 @@ class GroupWidget(QWidget):
         return False
 
     def wheelEvent(self, event):
-        # 节流：300ms 内只允许翻一次
-        if not hasattr(self, '_wheel_timer'):
-            self._wheel_timer = QElapsedTimer()
-            self._wheel_timer.start()
-        if self._wheel_timer.isValid() and self._wheel_timer.elapsed() < 300:
+        # 动画期间禁翻，避免状态冲突
+        if getattr(self, "_is_animating", False):
+            event.accept()
             return
-        self._wheel_timer.restart()
 
-        delta_y = event.angleDelta().y()
-        if delta_y > 0:
-            # 向上滚动，翻到上一页（往左）
+        pixel_delta = event.pixelDelta()
+        angle_delta = event.angleDelta()
+        dx = pixel_delta.x() if pixel_delta.x() != 0 else int(angle_delta.x() / 2)
+
+        if dx != 0:
+            # 初始化触控板滑动会话
+            if not getattr(self, "_touchpad_swipe_active", False):
+                self._touchpad_swipe_active = True
+                self._touchpad_swipe_accum = 0
+                self._touchpad_swipe_btns = []
+                for w in self.grid_widget.findChildren(AppButton):
+                    self._touchpad_swipe_btns.append(w)
+                for btn in self._touchpad_swipe_btns:
+                    if sip.isdeleted(btn):
+                        continue
+                    btn._orig_pos = btn.pos()
+
+            # 累计位移
+            self._touchpad_swipe_accum += dx
+
+            page_w = self.grid_widget.width()
+            threshold = page_w // 2
+
+            # 实时越阈值：立刻触发（不等松手）
+            if abs(self._touchpad_swipe_accum) >= threshold:
+                direction = "left" if self._touchpad_swipe_accum < 0 else "right"
+                is_first_page = (self.current_page == 0)
+                total_pages = max(1, (len(self.group['apps']) + self.items_per_page - 1) // self.items_per_page)
+                is_last_page = (self.current_page == total_pages - 1)
+
+                # 首页右滑 / 末页左滑：四分之一页回弹
+                if (direction == "right" and is_first_page) or (direction == "left" and is_last_page):
+                    group = QParallelAnimationGroup(self)
+                    for btn in self._touchpad_swipe_btns:
+                        if sip.isdeleted(btn):
+                            continue
+                        orig = getattr(btn, "_orig_pos", btn.pos())
+                        anim = QPropertyAnimation(btn, b"pos", self)
+                        anim.setDuration(180)
+                        anim.setStartValue(btn.pos())
+                        anim.setEndValue(orig)
+                        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+                        group.addAnimation(anim)
+
+                    def after_bounce():
+                        self._touchpad_swipe_active = False
+                        self._touchpad_swipe_accum = 0
+                        self._touchpad_swipe_direction = None
+                        self._touchpad_swipe_btns = []
+
+                    if self._touchpad_swipe_timer and self._touchpad_swipe_timer.isActive():
+                        self._touchpad_swipe_timer.stop()
+                    group.finished.connect(after_bounce)
+                    group.start()
+                    self._touchpad_swipe_anim = group
+                    event.accept()
+                    return
+
+                # 正常翻页（每次只翻一页）
+                if direction == "left":
+                    target_page = min(self.current_page + 1, total_pages - 1)
+                    remaining = -page_w - self._touchpad_swipe_accum
+                else:
+                    target_page = max(self.current_page - 1, 0)
+                    remaining = page_w - self._touchpad_swipe_accum
+
+                self._is_animating = True
+                group = QParallelAnimationGroup(self)
+                for btn in self._touchpad_swipe_btns:
+                    if sip.isdeleted(btn):
+                        continue
+                    anim = QPropertyAnimation(btn, b"pos", self)
+                    duration = min(240, 160 + int(min(abs(remaining), page_w) * 0.25))
+                    anim.setDuration(duration)
+                    anim.setStartValue(btn.pos())
+                    anim.setEndValue(btn.pos() + QPoint(remaining, 0))
+                    anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+                    group.addAnimation(anim)
+
+                def after_swipe_out():
+                    self.goto_page_immediate(target_page)
+                    self._is_animating = False
+                    self._touchpad_swipe_active = False
+                    self._touchpad_swipe_accum = 0
+                    self._touchpad_swipe_direction = None
+                    self._touchpad_swipe_btns = []
+
+                if self._touchpad_swipe_timer and self._touchpad_swipe_timer.isActive():
+                    self._touchpad_swipe_timer.stop()
+                group.finished.connect(after_swipe_out)
+                group.start()
+                self._touchpad_swipe_anim = group
+                event.accept()
+                return
+
+            # 未越阈值：跟手移动
+            for btn in self._touchpad_swipe_btns:
+                if sip.isdeleted(btn):
+                    continue
+                orig = getattr(btn, "_orig_pos", btn.pos())
+                btn.move(orig + QPoint(self._touchpad_swipe_accum, 0))
+
+            self._touchpad_swipe_direction = "left" if self._touchpad_swipe_accum < 0 else "right"
+
+            # “松手回弹”的兜底计时器（若中断输入，仍能回弹）
+            if self._touchpad_swipe_timer and self._touchpad_swipe_timer.isActive():
+                self._touchpad_swipe_timer.stop()
+            else:
+                self._touchpad_swipe_timer = QTimer(self)
+                self._touchpad_swipe_timer.setSingleShot(True)
+                self._touchpad_swipe_timer.timeout.connect(self._on_touchpad_swipe_release)
+            self._touchpad_swipe_timer.start(300)
+
+            event.accept()
+            return
+
+        # 正在触控板滑动会话时，忽略垂直滚动，避免干扰
+        if getattr(self, "_touchpad_swipe_active", False):
+            event.accept()
+            return
+
+        # 传统滚轮垂直翻页保留
+        dy = angle_delta.y()
+        total_pages = max(1, (len(self.group['apps']) + self.items_per_page - 1) // self.items_per_page)
+        if dy > 0:
             self.goto_page(max(self.current_page - 1, 0))
-        elif delta_y < 0:
-            # 向下滚动，翻到下一页（往右）
-            total_pages = max(1, (len(self.group['apps']) + self.items_per_page - 1) // self.items_per_page)
+        elif dy < 0:
             self.goto_page(min(self.current_page + 1, total_pages - 1))
-
-        delta_x = event.angleDelta().x()
-        if delta_x == 0:
-            return
-
-        if self._cooldown:
-            return
-
-        if self._gesture_timer.isValid() and self._gesture_timer.elapsed() < self._min_gesture_interval_ms:
-            return
-
-        self._gesture_timer.start()
-        self._accumulated_scroll += delta_x
-        self._reset_scroll_timer.start(2000)
-
-        if self._accumulated_scroll >= self._scroll_threshold:
-            self._start_cooldown()
-            self._reset_scroll()
-            self.goto_page(max(self.current_page - 1, 0))
-        elif self._accumulated_scroll <= -self._scroll_threshold:
-            self._start_cooldown()
-            self._reset_scroll()
-            total_pages = max(1, (len(self.group['apps']) + self.items_per_page - 1) // self.items_per_page)
-            self.goto_page(min(self.current_page + 1, total_pages - 1))
+        event.accept()
 
     def _start_cooldown(self):
         self._cooldown = True
@@ -2540,6 +2642,117 @@ class GroupWidget(QWidget):
         anim_group_out.finished.connect(cleanup_old_btns)
         anim_group_out.start()
         self.anim = anim_group_out
+
+    def _on_touchpad_swipe_release(self):
+        page_w = self.grid_widget.width()
+        threshold = page_w // 2
+        accum = self._touchpad_swipe_accum
+        direction = self._touchpad_swipe_direction
+        btns = self._touchpad_swipe_btns
+        total_pages = max(1, (len(self.group['apps']) + self.items_per_page - 1) // self.items_per_page)
+        is_first_page = self.current_page == 0
+        is_last_page = self.current_page == total_pages - 1
+
+        # 首页右滑
+        if is_first_page and accum > 0:
+            max_accum = page_w // 4
+            if accum > max_accum:
+                accum = max_accum
+            group = QParallelAnimationGroup(self)
+            for btn in btns:
+                if sip.isdeleted(btn):
+                    continue
+                orig = getattr(btn, "_orig_pos", btn.pos())
+                anim = QPropertyAnimation(btn, b"pos", self)
+                anim.setDuration(200)
+                anim.setStartValue(btn.pos())
+                anim.setEndValue(orig)
+                anim.setEasingCurve(QEasingCurve.Type.InBounce)
+                group.addAnimation(anim)
+            group.start()
+            self._touchpad_swipe_anim = group
+            self._touchpad_swipe_active = False
+            self._touchpad_swipe_accum = 0
+            self._touchpad_swipe_direction = None
+            self._touchpad_swipe_btns = []
+            return
+
+        # 末页左滑
+        if is_last_page and accum < 0:
+            min_accum = -page_w // 4
+            if accum < min_accum:
+                accum = min_accum
+            group = QParallelAnimationGroup(self)
+            for btn in btns:
+                if sip.isdeleted(btn):
+                    continue
+                orig = getattr(btn, "_orig_pos", btn.pos())
+                anim = QPropertyAnimation(btn, b"pos", self)
+                anim.setDuration(200)
+                anim.setStartValue(btn.pos())
+                anim.setEndValue(orig)
+                anim.setEasingCurve(QEasingCurve.Type.InBounce)
+                group.addAnimation(anim)
+            group.start()
+            self._touchpad_swipe_anim = group
+            self._touchpad_swipe_active = False
+            self._touchpad_swipe_accum = 0
+            self._touchpad_swipe_direction = None
+            self._touchpad_swipe_btns = []
+            return
+
+        # 正常回弹或翻页
+        if abs(accum) < threshold:
+            group = QParallelAnimationGroup(self)
+            for btn in btns:
+                if sip.isdeleted(btn):
+                    continue
+                orig = getattr(btn, "_orig_pos", btn.pos())
+                anim = QPropertyAnimation(btn, b"pos", self)
+                anim.setDuration(200)
+                anim.setStartValue(btn.pos())
+                anim.setEndValue(orig)
+                anim.setEasingCurve(QEasingCurve.Type.InBounce)
+                group.addAnimation(anim)
+            group.start()
+            self._touchpad_swipe_anim = group
+        else:
+            if direction == "left":
+                target_page = min(self.current_page + 1, total_pages - 1)
+                remaining = -page_w - accum
+            else:
+                target_page = max(self.current_page - 1, 0)
+                remaining = page_w - accum
+            group = QParallelAnimationGroup(self)
+            for btn in btns:
+                if sip.isdeleted(btn):
+                    continue
+                anim = QPropertyAnimation(btn, b"pos", self)
+                anim.setDuration(200)
+                anim.setStartValue(btn.pos())
+                anim.setEndValue(btn.pos() + QPoint(remaining, 0))
+                anim.setEasingCurve(QEasingCurve.Type.InBounce)
+                group.addAnimation(anim)
+
+            def on_anim_start():
+                self.goto_page_immediate(target_page)
+
+            group.stateChanged.connect(
+                lambda new, old: on_anim_start() if new == QAbstractAnimation.State.Running else None
+            )
+            group.start()
+            self._touchpad_swipe_anim = group
+        self._touchpad_swipe_active = False
+        self._touchpad_swipe_accum = 0
+        self._touchpad_swipe_direction = None
+        self._touchpad_swipe_btns = []
+
+    def goto_page_immediate(self, page: int):
+        total_pages = max(1, (len(self.group['apps']) + self.items_per_page - 1) // self.items_per_page)
+        if page < 0 or page >= total_pages:
+            return
+        self.current_page = page
+        self.display_apps(self.group['apps'], self.current_page)
 
 
 class Window(AcrylicWindow):
@@ -2803,6 +3016,39 @@ class LaunchpadWindow(QWidget):
         self.compact_mode_action.triggered.connect(self.toggle_compact_mode)
         self.menu.addAction(self.compact_mode_action)
 
+        self.auto_compact_mode_action = QAction(self.tr("🧠 Auto Compact Mode"), self)
+        self.auto_compact_mode_action.setCheckable(True)
+        self.auto_compact_mode_action.setChecked(self.read_auto_compact_mode_setting())
+        self.auto_compact_mode_action.triggered.connect(self.toggle_auto_compact_mode)
+        self.menu.addAction(self.auto_compact_mode_action)
+
+        # 动画速度初始值
+        self.page_anim_speed = self.read_anim_speed_setting()
+        # 创建 slider 放进菜单
+        slider_widget = QWidget()
+        slider_layout = QHBoxLayout()
+        slider_layout.setContentsMargins(10, 0, 10, 0)
+        slider_label = QLabel(self.tr("Flipping speed:"))
+        self.anim_speed_slider = QSlider(Qt.Orientation.Horizontal)
+        self.anim_speed_slider.setMinimum(5000)
+        self.anim_speed_slider.setMaximum(10000)
+        self.anim_speed_slider.setValue(self.page_anim_speed)
+        self.anim_speed_slider.setTickInterval(500)
+        self.anim_speed_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.anim_speed_slider.setFixedWidth(120)
+        self.anim_speed_value_label = QLabel(str(self.page_anim_speed))
+        self.anim_speed_value_label.setFixedWidth(50)
+        slider_layout.addWidget(slider_label)
+        slider_layout.addWidget(self.anim_speed_slider)
+        slider_layout.addWidget(self.anim_speed_value_label)
+        slider_widget.setLayout(slider_layout)
+
+        slider_action = QWidgetAction(self)
+        slider_action.setDefaultWidget(slider_widget)
+        self.menu.addAction(slider_action)
+
+        self.anim_speed_slider.valueChanged.connect(self.on_anim_speed_changed)
+
         self.menu.addSeparator()
 
         # 新增菜单项：运行 lporg
@@ -2839,7 +3085,7 @@ class LaunchpadWindow(QWidget):
         self.clear_cache_worker = None
 
         # 你已有的 self.win_update = WindowUpdate()
-        self.win_update = WindowUpdate()
+        #self.win_update = WindowUpdate()
         # 启动自动更新线程（24h = 86400秒）
         self.update_check_worker = UpdateCheckWorker(current_version='v' + VERSION, interval_seconds=86400)
         self.update_check_worker.update_available.connect(self.on_update_available)  # 主线程槽
@@ -2857,6 +3103,16 @@ class LaunchpadWindow(QWidget):
         self._reset_scroll_timer = QTimer()
         self._reset_scroll_timer.setSingleShot(True)
         self._reset_scroll_timer.timeout.connect(self._reset_scroll)
+
+        # 触控板滑动相关变量
+        self._touchpad_swipe_active = False
+        self._touchpad_swipe_accum = 0
+        self._touchpad_swipe_direction = None
+        self._touchpad_swipe_btns = []
+        self._touchpad_swipe_anim = None
+        self._is_animating = False
+
+        self._last_screen_width = None
 
         self.setFocus()
 
@@ -3879,45 +4135,159 @@ class LaunchpadWindow(QWidget):
             pass
 
     def wheelEvent(self, event):
-        # 节流：300ms 内只允许翻一次
-        if not hasattr(self, '_wheel_timer'):
-            self._wheel_timer = QElapsedTimer()
-            self._wheel_timer.start()
-        if self._wheel_timer.isValid() and self._wheel_timer.elapsed() < 300:
+        # 动画期间禁翻，避免状态冲突
+        if getattr(self, "_is_animating", False):
+            event.accept()
             return
-        self._wheel_timer.restart()
 
-        # 鼠标滚轮上下滚动时翻页
-        delta_y = event.angleDelta().y()
-        if delta_y > 0:
-            # 向上滚动，翻到上一页（往左）
+        pixel_delta = event.pixelDelta()
+        angle_delta = event.angleDelta()
+        dx = pixel_delta.x() if pixel_delta.x() != 0 else int(angle_delta.x() / 2)
+
+        if dx != 0:
+            # 初始化触控板滑动会话
+            if not getattr(self, "_touchpad_swipe_active", False):
+                self._touchpad_swipe_active = True
+                self._touchpad_swipe_accum = 0
+                self._touchpad_swipe_btns = []
+                grid_layout = self.main_content.grid_layout
+                for i in range(grid_layout.count()):
+                    w = grid_layout.itemAt(i).widget()
+                    if isinstance(w, (AppButton, GroupButton)):
+                        self._touchpad_swipe_btns.append(w)
+                for btn in self._touchpad_swipe_btns:
+                    if sip.isdeleted(btn):
+                        continue
+                    btn._orig_pos = btn.pos()
+
+            # 累计位移
+            self._touchpad_swipe_accum += dx
+
+            page_w = self.main_content.grid_widget.width()
+            threshold = page_w // 2
+
+            # 实时越阈值：立刻触发（不等松手）
+            if abs(self._touchpad_swipe_accum) >= threshold:
+                direction = "left" if self._touchpad_swipe_accum < 0 else "right"
+                is_first_page = (self.current_page == 0)
+                is_last_page = (self.current_page == self.total_pages() - 1)
+
+                # 首页右滑 / 末页左滑：四分之一页回弹
+                if (direction == "right" and is_first_page) or (direction == "left" and is_last_page):
+                    group = QParallelAnimationGroup(self)
+                    for btn in self._touchpad_swipe_btns:
+                        if sip.isdeleted(btn):
+                            continue
+                        orig = getattr(btn, "_orig_pos", btn.pos())
+                        anim = QPropertyAnimation(btn, b"pos", self)
+                        anim.setDuration(180)
+                        anim.setStartValue(btn.pos())
+                        anim.setEndValue(orig)
+                        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+                        group.addAnimation(anim)
+
+                    def after_bounce():
+                        # 彻底复位滑动状态
+                        self._touchpad_swipe_active = False
+                        self._touchpad_swipe_accum = 0
+                        self._touchpad_swipe_direction = None
+                        self._touchpad_swipe_btns = []
+
+                    # 停掉迟到的“松手计时器”
+                    if hasattr(self, "_touchpad_swipe_timer") and self._touchpad_swipe_timer.isActive():
+                        self._touchpad_swipe_timer.stop()
+
+                    group.finished.connect(after_bounce)
+                    group.start()
+                    self._touchpad_swipe_anim = group
+                    event.accept()
+                    return
+
+                # 正常翻页（每次只翻一页）
+                if direction == "left":
+                    target_page = min(self.current_page + 1, self.total_pages() - 1)
+                    remaining = -page_w - self._touchpad_swipe_accum
+                else:
+                    target_page = max(self.current_page - 1, 0)
+                    remaining = page_w - self._touchpad_swipe_accum
+
+                # 若有旧动画在跑，停掉，避免僵尸动画阻塞 finished
+                try:
+                    if hasattr(self, "anim") and self.anim is not None:
+                        self.anim.stop()
+                except Exception:
+                    pass
+
+                self._is_animating = True
+
+                group = QParallelAnimationGroup(self)
+                for btn in self._touchpad_swipe_btns:
+                    if sip.isdeleted(btn):
+                        continue
+                    anim = QPropertyAnimation(btn, b"pos", self)
+                    # 时长上限，避免异常起点导致的超长动画
+                    duration = min(240, 160 + int(min(abs(remaining), page_w) * 0.25))
+                    anim.setDuration(duration)
+                    anim.setStartValue(btn.pos())
+                    anim.setEndValue(btn.pos() + QPoint(remaining, 0))
+                    anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+                    group.addAnimation(anim)
+
+                def after_swipe_out():
+                    # 核心：直接切页，不再进 goto_page → animate_page_transition 的第二段过场
+                    self.goto_page_immediate(target_page)
+
+                    # 彻底清理状态，确保下一次滑动正常
+                    self._is_animating = False
+                    self._touchpad_swipe_active = False
+                    self._touchpad_swipe_accum = 0
+                    self._touchpad_swipe_direction = None
+                    self._touchpad_swipe_btns = []
+
+                # 停掉迟到的“松手计时器”，防止回调叠加
+                if hasattr(self, "_touchpad_swipe_timer") and self._touchpad_swipe_timer.isActive():
+                    self._touchpad_swipe_timer.stop()
+
+                group.finished.connect(after_swipe_out)
+                group.start()
+                self._touchpad_swipe_anim = group
+
+                event.accept()
+                return
+
+            # 未越阈值：跟手移动
+            for btn in self._touchpad_swipe_btns:
+                if sip.isdeleted(btn):
+                    continue
+                orig = getattr(btn, "_orig_pos", btn.pos())
+                btn.move(orig + QPoint(self._touchpad_swipe_accum, 0))
+
+            self._touchpad_swipe_direction = "left" if self._touchpad_swipe_accum < 0 else "right"
+
+            # “松手回弹”的兜底计时器（若中断输入，仍能回弹）
+            if hasattr(self, "_touchpad_swipe_timer") and self._touchpad_swipe_timer.isActive():
+                self._touchpad_swipe_timer.stop()
+            else:
+                self._touchpad_swipe_timer = QTimer(self)
+                self._touchpad_swipe_timer.setSingleShot(True)
+                self._touchpad_swipe_timer.timeout.connect(self._on_touchpad_swipe_release)
+            self._touchpad_swipe_timer.start(300)
+
+            event.accept()
+            return
+
+        # 正在触控板滑动会话时，忽略垂直滚动，避免干扰
+        if getattr(self, "_touchpad_swipe_active", False):
+            event.accept()
+            return
+
+        # 传统滚轮垂直翻页保留
+        dy = angle_delta.y()
+        if dy > 0:
             self.goto_page(max(self.current_page - 1, 0))
-        elif delta_y < 0:
-            # 向下滚动，翻到下一页（往右）
+        elif dy < 0:
             self.goto_page(min(self.current_page + 1, self.total_pages() - 1))
-
-        delta_x = event.angleDelta().x()
-        if delta_x == 0:
-            return
-
-        if self._cooldown:
-            return
-
-        if self._gesture_timer.isValid() and self._gesture_timer.elapsed() < self._min_gesture_interval_ms:
-            return
-
-        self._gesture_timer.start()
-        self._accumulated_scroll += delta_x
-        self._reset_scroll_timer.start(2000)
-
-        if self._accumulated_scroll >= self._scroll_threshold:
-            self._start_cooldown()
-            self._reset_scroll()
-            self.goto_page(max(self.current_page - 1, 0))
-        elif self._accumulated_scroll <= -self._scroll_threshold:
-            self._start_cooldown()
-            self._reset_scroll()
-            self.goto_page(min(self.current_page + 1, self.total_pages() - 1))
+        event.accept()
 
     def _start_cooldown(self):
         self._cooldown = True
@@ -4202,7 +4572,7 @@ class LaunchpadWindow(QWidget):
             return
 
         screen_width = self.width()
-        speed = 6000
+        speed = self.page_anim_speed  # slider 可调速度
         anim_group_out = QParallelAnimationGroup(self)
 
         for btn in old_btns:
@@ -4215,7 +4585,8 @@ class LaunchpadWindow(QWidget):
             else:
                 end_pos = QPoint(screen_width + btn.width(), start_pos.y())
                 distance = screen_width - start_pos.x() + btn.width()
-            duration = max(80, int(distance / speed * 1000))
+            duration = max(80, int(distance / max(1000, speed) * 1000))
+            duration = min(duration, 350)  # 关键：强制上限，避免“超长等待”
             anim = QPropertyAnimation(btn, b"pos", self)
             anim.setDuration(duration)
             anim.setStartValue(start_pos)
@@ -4224,11 +4595,9 @@ class LaunchpadWindow(QWidget):
             anim_group_out.addAnimation(anim)
 
         def cleanup_old_btns():
-            # 旧按钮可能已被其它路径清理，安全处理
             for btn in old_btns:
                 safe_delete_widget(btn)
-
-            # 动画结束后再统一刷新本页（注意：next_page_items 是 [('group'| 'app', obj), ...]）
+            # 动画结束后再统一刷新本页（next_page_items: [('group'|'app', obj), ...]）
             self.display_apps([obj for typ, obj in next_page_items if typ == 'app'], self.current_page)
             self._is_animating = False
 
@@ -4243,25 +4612,20 @@ class LaunchpadWindow(QWidget):
         webbrowser.open('https://buymeacoffee.com/ryanthehito/e/451635')
 
     def adapt_to_screen(self):
-        """每次显示或分辨率变化时调用，让窗口和所有子布局都重算尺寸"""
-        # 1️⃣ 选定目标屏幕
         screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
         geo: QRect = screen.geometry()
-
-        # 2️⃣ 如果尺寸真的变了才更新
+        screen_width = geo.width()
         if geo != self.geometry():
             self.setGeometry(geo)
-
-            # 让主内容覆盖整个窗口
             self.main_content.setGeometry(self.rect())
-
-            # 如果正在显示 group_widget，也需要重新居中
             if self.group_widget and self.group_widget.isVisible():
                 gw = self.group_widget
                 gw.move((self.width() - gw.width()) // 2,
                         (self.height() - gw.height()) // 2)
-
-            # 3️⃣ 重新排布图标（依赖 self.width()/height() 的那些计算）
+            # 只有屏幕宽度变化时才自动判断
+            if self._last_screen_width != screen_width:
+                self._last_screen_width = screen_width
+                self.check_and_apply_compact_mode()
             self.display_apps(self.filtered_apps, self.current_page)
 
     def read_traditional_mode(self):
@@ -4399,6 +4763,7 @@ class LaunchpadWindow(QWidget):
     def toggle_compact_mode(self):
         self.compact_mode = self.compact_mode_action.isChecked()
         self.write_compact_mode_setting(self.compact_mode)
+        self.check_and_apply_compact_mode()  # 新增：自动判断
         self.display_apps(self.filtered_apps, self.current_page)
 
         # 仅保存 bool，别保存边距
@@ -4419,6 +4784,228 @@ class LaunchpadWindow(QWidget):
                 f.write("1" if enabled else "0")
         except Exception:
             pass
+
+    def read_anim_speed_setting(self):
+        path = os.path.expanduser("~/.raspberry_anim_speed")
+        try:
+            if os.path.exists(path):
+                return int(open(path, "r", encoding="utf-8").read().strip())
+        except Exception:
+            pass
+        return 8000  # 默认值
+
+    def write_anim_speed_setting(self, val):
+        path = os.path.expanduser("~/.raspberry_anim_speed")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(str(val))
+        except Exception:
+            pass
+
+    def on_anim_speed_changed(self, val):
+        self.page_anim_speed = val
+        self.anim_speed_value_label.setText(str(val))
+        self.write_anim_speed_setting(val)
+
+    def _on_touchpad_swipe_release(self):
+        page_w = self.main_content.grid_widget.width()
+        threshold = page_w // 2
+        accum = self._touchpad_swipe_accum
+        direction = self._touchpad_swipe_direction
+        btns = self._touchpad_swipe_btns
+
+        # 新增：首末页判断
+        is_first_page = self.current_page == 0
+        is_last_page = self.current_page == self.total_pages() - 1
+
+        # 如果是首页且向右滑（accum>0），只允许滑动四分之一页
+        if is_first_page and accum > 0:
+            max_accum = page_w // 4
+            if accum > max_accum:
+                accum = max_accum
+            # 回弹动画
+            group = QParallelAnimationGroup(self)
+            for btn in btns:
+                if sip.isdeleted(btn):
+                    continue
+                orig = getattr(btn, "_orig_pos", btn.pos())
+                anim = QPropertyAnimation(btn, b"pos", self)
+                anim.setDuration(200)
+                anim.setStartValue(btn.pos())
+                anim.setEndValue(orig)
+                anim.setEasingCurve(QEasingCurve.Type.InBounce)
+                group.addAnimation(anim)
+            group.start()
+            self._touchpad_swipe_anim = group
+            # 清理状态
+            self._touchpad_swipe_active = False
+            self._touchpad_swipe_accum = 0
+            self._touchpad_swipe_direction = None
+            self._touchpad_swipe_btns = []
+            return
+
+        # 如果是末页且向左滑（accum<0），只允许滑动四分之一页
+        if is_last_page and accum < 0:
+            min_accum = -page_w // 4
+            if accum < min_accum:
+                accum = min_accum
+            # 回弹动画
+            group = QParallelAnimationGroup(self)
+            for btn in btns:
+                if sip.isdeleted(btn):
+                    continue
+                orig = getattr(btn, "_orig_pos", btn.pos())
+                anim = QPropertyAnimation(btn, b"pos", self)
+                anim.setDuration(200)
+                anim.setStartValue(btn.pos())
+                anim.setEndValue(orig)
+                anim.setEasingCurve(QEasingCurve.Type.InBounce)
+                group.addAnimation(anim)
+            group.start()
+            self._touchpad_swipe_anim = group
+            # 清理状态
+            self._touchpad_swipe_active = False
+            self._touchpad_swipe_accum = 0
+            self._touchpad_swipe_direction = None
+            self._touchpad_swipe_btns = []
+            return
+
+        # 正常翻页逻辑
+        if abs(accum) < threshold:
+            # 回弹
+            group = QParallelAnimationGroup(self)
+            for btn in btns:
+                if sip.isdeleted(btn):
+                    continue
+                orig = getattr(btn, "_orig_pos", btn.pos())
+                anim = QPropertyAnimation(btn, b"pos", self)
+                anim.setDuration(200)
+                anim.setStartValue(btn.pos())
+                anim.setEndValue(orig)
+                anim.setEasingCurve(QEasingCurve.Type.InBounce)
+                group.addAnimation(anim)
+            group.start()
+            self._touchpad_swipe_anim = group
+        else:
+            # 继续补完翻页距离（从当前位置继续）
+            if direction == "left":
+                target_page = min(self.current_page + 1, self.total_pages() - 1)
+                remaining = -page_w - accum
+            else:
+                target_page = max(self.current_page - 1, 0)
+                remaining = page_w - accum
+
+            group = QParallelAnimationGroup(self)
+            for btn in btns:
+                if sip.isdeleted(btn):
+                    continue
+                anim = QPropertyAnimation(btn, b"pos", self)
+                anim.setDuration(200)
+                anim.setStartValue(btn.pos())
+                anim.setEndValue(btn.pos() + QPoint(remaining, 0))
+                anim.setEasingCurve(QEasingCurve.Type.InBounce)
+                group.addAnimation(anim)
+
+            # 动画开始时就刷新页面
+            def on_anim_start():
+                self.goto_page(target_page)
+
+            group.stateChanged.connect(
+                lambda new, old: on_anim_start() if new == QAbstractAnimation.State.Running else None
+            )
+            group.start()
+            self._touchpad_swipe_anim = group
+
+        # 清理状态
+        self._touchpad_swipe_active = False
+        self._touchpad_swipe_accum = 0
+        self._touchpad_swipe_direction = None
+        self._touchpad_swipe_btns = []
+
+    def goto_page_immediate(self, page: int):
+        total_pages = self.total_pages()
+        if page < 0 or page >= total_pages:
+            return
+        self.current_page = page
+        # 同步小圆点
+        self.update_page_indicator(
+            len(self.main_order) if not self.main_content.search_bar.text().strip()
+            else len(self.filtered_apps)
+        )
+        # 立刻上新，无过场
+        self.display_apps(self.filtered_apps, self.current_page)
+
+    def read_auto_compact_mode_setting(self):
+        path = os.path.expanduser("~/.raspberry_auto_compact_mode")
+        try:
+            if os.path.exists(path):
+                return open(path, "r", encoding="utf-8").read().strip() == "1"
+        except Exception:
+            pass
+        return True  # 默认自动
+
+    def write_auto_compact_mode_setting(self, enabled: bool):
+        path = os.path.expanduser("~/.raspberry_auto_compact_mode")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("1" if enabled else "0")
+        except Exception:
+            pass
+
+    def toggle_auto_compact_mode(self):
+        enabled = self.auto_compact_mode_action.isChecked()
+        self.write_auto_compact_mode_setting(enabled)
+        # 立即判断一次
+        self.check_and_apply_compact_mode()
+        self.display_apps(self.filtered_apps, self.current_page)
+
+    def check_and_apply_compact_mode(self):
+        if not self.read_auto_compact_mode_setting():
+            return
+
+        # 先用正常模式布局
+        self.compact_mode = False
+        self.compact_mode_action.setChecked(False)
+        self.write_compact_mode_setting(False)
+        self.display_apps(self.filtered_apps, self.current_page)
+        QApplication.processEvents()  # 强制刷新布局
+        gap_normal = self.get_actual_icon_gap()
+
+        # 再用紧凑模式布局
+        self.compact_mode = True
+        self.compact_mode_action.setChecked(True)
+        self.write_compact_mode_setting(True)
+        self.display_apps(self.filtered_apps, self.current_page)
+        QApplication.processEvents()
+        gap_compact = self.get_actual_icon_gap()
+
+        # 比较实际间距
+        if gap_compact > gap_normal:
+            # 紧凑模式间距反而更大，关闭紧凑模式
+            self.compact_mode = False
+            self.compact_mode_action.setChecked(False)
+            self.write_compact_mode_setting(False)
+            self.display_apps(self.filtered_apps, self.current_page)
+        else:
+            # 紧凑模式间距更小，保持紧凑模式
+            self.compact_mode = True
+            self.compact_mode_action.setChecked(True)
+            self.write_compact_mode_setting(True)
+            self.display_apps(self.filtered_apps, self.current_page)
+
+    def get_actual_icon_gap(self):
+        grid_layout = self.main_content.grid_layout
+        btns = []
+        for i in range(grid_layout.count()):
+            w = grid_layout.itemAt(i).widget()
+            if isinstance(w, (AppButton, GroupButton)):
+                btns.append(w)
+        if len(btns) < 2:
+            return 0
+        # 取第一个和第二个按钮的 x 坐标
+        x0 = btns[0].pos().x()
+        x1 = btns[1].pos().x()
+        return x1 - x0
 
 
 class WindowAbout(QWidget):  # 增加说明页面(About)

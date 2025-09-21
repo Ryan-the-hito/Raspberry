@@ -43,7 +43,7 @@ os.makedirs(ICON_CACHE_DIR, exist_ok=True)
 APP_PATHS_FILE = os.path.expanduser("~/.launchpad_app_paths.json")
 APP_ORDER_FILE = os.path.expanduser("~/.launchpad_app_order.json")
 MAIN_ORDER_FILE = os.path.expanduser("~/.launchpad_main_order.json")
-VERSION = "0.0.13"
+VERSION = "0.0.14"
 NAME = 'Raspberry'
 
 os.environ["QT_QUICK_BACKEND"] = "metal"
@@ -2944,78 +2944,84 @@ class LaunchpadWindow(QWidget):
         grid_layout = self.main_content.grid_layout
         grid_widget = self.main_content.grid_widget
 
-        # 彻底清理
+        # 先移除布局项
         for i in reversed(range(grid_layout.count())):
             w = grid_layout.itemAt(i).widget()
-            if w:
-                w.setParent(None)
-                w.deleteLater()
-        # 防止历史绝对定位残留（保险）
+            try:
+                if w is not None:
+                    w.setParent(None)
+                    w.deleteLater()
+            except RuntimeError:
+                pass
+
+        # 再保险：删除 grid_widget 下残留子控件，但跳过 overlay
         for w in grid_widget.findChildren(QWidget):
             if w is grid_widget:
                 continue
-            w.setParent(None)
-            w.deleteLater()
+            if w.objectName() == "insertOverlay":
+                continue
+            try:
+                w.setParent(None)
+                w.deleteLater()
+            except RuntimeError:
+                pass
 
         start = page * self.items_per_page
         end = start + self.items_per_page
 
-        # 判断是否在搜索
         is_searching = bool(self.main_content.search_bar.text().strip())
         if is_searching:
-            # 只显示搜索到的app
             page_items = [('app', app) for app in apps[start:end]]
         else:
-            # 正常显示 group + app
             page_items = self.main_order[start:end]
 
-        # 常量（按你现有的）
+        # 常量
         MAX_COLS = 7
-        MAX_ROWS = 5
         ICON_W = 140
-        ICON_H = 140
+        MAX_ROWS = 5
+        MIN_HGAP, MAX_HGAP = 10, ICON_W
 
-        # —— 仅在 compact 模式下：动态计算左右内边距和水平间距 —— #
+        n = min(len(page_items), MAX_COLS * MAX_ROWS)
+        used_cols = min(MAX_COLS, max(1, n))
+        m = grid_layout.contentsMargins()
+        top_m, bot_m = m.top(), m.bottom()
+        avail_w = max(0, grid_widget.width() - m.left() - m.right())
+
+        # 1) 基准 hgap：始终按“满一行”来计算（不会因为搜索变少而改变）
+        if MAX_COLS > 1:
+            possible_gap_full = max(MIN_HGAP, (avail_w - MAX_COLS * ICON_W) // (MAX_COLS - 1))
+            hgap_base = min(MAX_HGAP, possible_gap_full)
+        else:
+            hgap_base = MIN_HGAP
+
         if getattr(self, 'compact_mode', False):
-            n = min(len(page_items), MAX_COLS * MAX_ROWS)
-            used_cols = min(MAX_COLS, max(1, n))
-
-            # 取当前垂直边距以保持不变
-            m = grid_layout.contentsMargins()
-            top_m, bot_m = m.top(), m.bottom()
-
-            # 允许的水平间距：不超过一个图标宽度；给个下限防止太挤
-            MIN_HGAP, MAX_HGAP = 10, ICON_W
-
-            # 可用宽度（不含当前左右内边距）
-            avail_w = max(0, grid_widget.width() - m.left() - m.right())
-
-            if used_cols > 1:
-                possible_gap = max(MIN_HGAP, (avail_w - used_cols * ICON_W) // (used_cols - 1))
-                hgap = min(MAX_HGAP, possible_gap)
-            else:
-                hgap = 0
-
-            # 本页内容总宽度（按本页有效列数）
-            content_w = used_cols * ICON_W + (used_cols - 1) * hgap
-
-            # 左右内边距用于“把内容挤到中间”
+            hgap = hgap_base
+            content_w = MAX_COLS * ICON_W + (MAX_COLS - 1) * hgap
             side_margin = max(0, (grid_widget.width() - content_w) // 2)
-
-            # 应用：只改左右 margin 与水平 spacing；上下保持不动
             grid_layout.setContentsMargins(side_margin, top_m, side_margin, bot_m)
             grid_layout.setHorizontalSpacing(hgap)
+            # if is_searching and used_cols < MAX_COLS:
+            #     # 搜索且不满一行：靠左对齐 + 用满行的基准间距
+            #     hgap = hgap_base
+            #     grid_layout.setContentsMargins(0, top_m, 0, bot_m)
+            #     grid_layout.setHorizontalSpacing(hgap)
+            # else:
+            #     # 非搜索或满一行：内容居中
+            #     hgap = hgap_base
+            #     content_w = used_cols * ICON_W + (used_cols - 1) * hgap
+            #     side_margin = max(0, (grid_widget.width() - content_w) // 2)
+            #     grid_layout.setContentsMargins(side_margin, top_m, side_margin, bot_m)
+            #     grid_layout.setHorizontalSpacing(hgap)
         else:
-            # 正常模式：完全按你原来的布局表现
-            # 恢复“默认水平间距 + 左右边距=0”，不碰上下边距
+            # 正常模式
             m = grid_layout.contentsMargins()
             grid_layout.setContentsMargins(0, m.top(), 0, m.bottom())
-            grid_layout.setHorizontalSpacing(-1)  # -1 使用 style 默认
+            grid_layout.setHorizontalSpacing(-1)
 
-        # ———— 下面保持原始摆放逻辑（不变） ———— #
+        # 摆放按钮
         for idx, (typ, obj) in enumerate(page_items):
-            row, col = divmod(idx, 7)
-            if row >= 5:
+            row, col = divmod(idx, MAX_COLS)
+            if row >= MAX_ROWS:
                 break
             if typ == 'group':
                 btn = GroupButton(obj, self.main_content.grid_widget, main_window=self)
@@ -3025,14 +3031,14 @@ class LaunchpadWindow(QWidget):
 
         # 补齐空白按钮
         total = len(page_items)
-        for idx in range(total, 35):
-            row, col = divmod(idx, 7)
-            if row >= 5:
+        for idx in range(total, MAX_COLS * MAX_ROWS):
+            row, col = divmod(idx, MAX_COLS)
+            if row >= MAX_ROWS:
                 break
             btn = EmptyButton(main_window=self, parent=self.main_content.grid_widget)
             grid_layout.addWidget(btn, row, col)
 
-        # 指示器数量也要区分
+        # 指示器数量
         if is_searching:
             self.update_page_indicator(len(apps))
         else:

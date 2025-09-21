@@ -16,8 +16,8 @@ from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QGridLayout, QPushButton, QLineEdit, QMenu, QLabel, QHBoxLayout, QSizePolicy, QMenuBar, QMessageBox, QFileDialog, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QDialog, QTextEdit, QToolButton, QProgressBar
 )
-from PyQt6.QtGui import QIcon, QPixmap, QPainter, QFont, QPalette, QColor, QGuiApplication, QPainterPath, QRegion, QMouseEvent, QTextOption, QFontMetrics, QLinearGradient, QPen, QBrush, QAction, QSurfaceFormat, QCursor
-from PyQt6.QtCore import Qt, QPropertyAnimation, QRect, pyqtSignal, QSize, QPoint, QRectF, QTimer, QThread, QEasingCurve, QParallelAnimationGroup, QAbstractAnimation, QEvent, QPointF, QCoreApplication, QElapsedTimer, QEventLoop, QTranslator, QLocale, QLibraryInfo, pyqtSlot
+from PyQt6.QtGui import QIcon, QPixmap, QPainter, QFont, QPalette, QColor, QGuiApplication, QPainterPath, QRegion, QMouseEvent, QTextOption, QFontMetrics, QLinearGradient, QPen, QBrush, QAction, QSurfaceFormat, QCursor, QDrag
+from PyQt6.QtCore import Qt, QPropertyAnimation, QRect, pyqtSignal, QSize, QPoint, QRectF, QTimer, QThread, QEasingCurve, QParallelAnimationGroup, QAbstractAnimation, QEvent, QPointF, QCoreApplication, QElapsedTimer, QEventLoop, QTranslator, QLocale, QLibraryInfo, pyqtSlot, QMargins, QMimeData
 from qframelesswindow import AcrylicWindow, FramelessWindow, TitleBar, StandardTitleBar
 import hashlib
 import sys
@@ -45,7 +45,7 @@ os.makedirs(ICON_CACHE_DIR, exist_ok=True)
 APP_PATHS_FILE = os.path.expanduser("~/.launchpad_app_paths.json")
 APP_ORDER_FILE = os.path.expanduser("~/.launchpad_app_order.json")
 MAIN_ORDER_FILE = os.path.expanduser("~/.launchpad_main_order.json")
-VERSION = "0.0.13"
+VERSION = "0.0.14"
 NAME = 'Raspberry Pro'
 
 os.environ["QT_QUICK_BACKEND"] = "metal"
@@ -663,6 +663,355 @@ def safe_delete_widget(w):
             w.deleteLater()
     except RuntimeError:
         pass
+
+
+# 拖拽排序常量（与你现有布局一致）
+GRID_COLS = 7
+GRID_ROWS = 5
+ICON_W = 140
+ICON_H = 140
+AUTO_PAGE_EDGE_PX = 40        # 靠左右边缘触发自动翻页的感应宽度
+AUTO_PAGE_DELAY_MS = 500      # 悬停翻页延迟
+
+
+class InsertCursorOverlay(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._visible = False
+        self._line_x = None
+        self._line_top = 0
+        self._line_bottom = 0
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setObjectName("insertOverlay")
+        self.hide()
+
+    def show_line(self, x: int, top: int, bottom: int):
+        # 健壮：父已销毁/不可用时直接忽略
+        p = self.parentWidget()
+        if p is None:
+            return
+        try:
+            self.setGeometry(p.rect())
+        except RuntimeError:
+            return
+
+        self._visible = True
+        self._line_x = x
+        self._line_top = top
+        self._line_bottom = bottom
+        self.show()
+        self.update()
+
+    def hide_line(self):
+        if not self._visible:
+            return
+        self._visible = False
+        self._line_x = None
+        try:
+            self.hide()
+        except RuntimeError:
+            pass
+        self.update()
+
+    def paintEvent(self, event):
+        if not self._visible or self._line_x is None:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(0, 120, 255), 3)
+        painter.setPen(pen)
+        painter.drawLine(self._line_x, self._line_top, self._line_x, self._line_bottom)
+
+
+
+class AppGridWidget(QWidget):
+    """
+    作为主界面和组内网格容器的统一拖拽目标：
+    - 计算插入槽位（row, col -> slot_index）
+    - 绘制插入光标（通过 InsertCursorOverlay）
+    - 自动翻页（左右边缘悬停）
+    调用方需提供回调：
+      - get_page_items(): 返回当前页的“可视条目”列表 [('group'|'app', obj), ...] 或 仅 apps
+      - on_drop_app(app_path: str, slot_index_on_page: int): 执行排序后的数据更新
+      - request_page_change(direction: int): -1 往左翻页，+1 往右翻页
+      - accept_groups: bool  本网格是否包含 group（主界面 True，组内 False）
+      - clamp_to_app_zone: bool 主界面 True（只允许 apps 段），组内 False
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.overlay = InsertCursorOverlay(self)
+        self._get_page_items = None
+        self._on_drop_app = None
+        self._request_page_change = None
+        self._accept_groups = True
+        self._clamp_to_app_zone = False
+
+        self._auto_page_timer = QTimer(self)
+        self._auto_page_timer.setSingleShot(True)
+        self._auto_page_timer.timeout.connect(self._do_auto_page)
+        self._auto_page_dir = 0  # -1 左, +1 右
+
+        self._enable_drag = True
+
+        self._edge_hover_timer = QTimer(self)
+        self._edge_hover_timer.setSingleShot(True)
+        self._edge_hover_timer.timeout.connect(self._do_edge_auto_move)
+        self._edge_hover_info = None  # (direction, app_path)
+
+    def configure(self, get_page_items, on_drop_app, request_page_change,
+                  accept_groups=True, clamp_to_app_zone=False, enable_drag=True):
+        self._get_page_items = get_page_items
+        self._on_drop_app = on_drop_app
+        self._request_page_change = request_page_change
+        self._accept_groups = accept_groups
+        self._clamp_to_app_zone = clamp_to_app_zone
+        self._enable_drag = enable_drag
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        try:
+            if hasattr(self, "overlay") and self.overlay is not None:
+                self.overlay.resize(self.size())
+        except RuntimeError:
+            # overlay 已经被 Qt 删除，忽略
+            pass
+
+    # ---- 拖拽事件 ----
+    def dragEnterEvent(self, event):
+        if not self._enable_drag:
+            event.ignore()
+            return
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if not self._enable_drag:
+            event.ignore()
+            return
+
+        self._ensure_overlay()
+        slot_idx, line_x, line_top, line_bottom = self._calc_insert_visuals(event.position().toPoint())
+        items = self._get_page_items() if self._get_page_items else []
+        n = min(len(items), GRID_COLS * GRID_ROWS)
+
+        # 判断是否在第一页第一个/最后一个插入位置
+        is_first = (slot_idx == 0)
+        is_last = (slot_idx == n)
+        if is_first or is_last:
+            # 启动2秒定时器
+            if not self._edge_hover_timer.isActive():
+                app_path = event.mimeData().text()
+                direction = -1 if is_first else +1
+                self._edge_hover_info = (direction, app_path)
+                self._edge_hover_timer.start(2000)
+        else:
+            self._edge_hover_timer.stop()
+            self._edge_hover_info = None
+
+        if slot_idx is None:
+            try:
+                self.overlay.hide_line()
+            except RuntimeError:
+                pass
+            event.ignore()
+            return
+
+        try:
+            self.overlay.show_line(line_x, line_top, line_bottom)
+        except RuntimeError:
+            self._ensure_overlay()
+        event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event):
+        self._auto_page_timer.stop()
+        self._auto_page_dir = 0
+        self._edge_hover_timer.stop()
+        self._edge_hover_info = None
+        try:
+            self.overlay.hide_line()
+        except RuntimeError:
+            pass
+        event.accept()
+
+    def dropEvent(self, event):
+        if not self._enable_drag:
+            event.ignore()
+            return
+        self._auto_page_timer.stop()
+        self._auto_page_dir = 0
+        self._edge_hover_timer.stop()
+        self._edge_hover_info = None
+        pos = event.position().toPoint()
+        slot_idx, *_ = self._calc_insert_visuals(pos)
+        try:
+            self.overlay.hide_line()
+        except RuntimeError:
+            pass
+        if slot_idx is None or not self._on_drop_app:
+            event.ignore()
+            return
+        app_path = event.mimeData().text()
+        self._on_drop_app(app_path, slot_idx)
+        event.acceptProposedAction()
+
+    # ---
+
+    def _do_edge_auto_move(self):
+        # 2秒到时，翻页并移动app
+        if not self._edge_hover_info:
+            return
+        direction, app_path = self._edge_hover_info
+        self._edge_hover_info = None
+        if self._request_page_change:
+            self._request_page_change(direction)
+        # 需要等翻页完成后再插入
+        QTimer.singleShot(100, lambda: self._auto_move_app_after_page_change(app_path, direction))
+
+    def _auto_move_app_after_page_change(self, app_path, direction):
+        # direction: -1=上一页, +1=下一页
+        # 插入到新页的第一个/最后一个位置
+        items = self._get_page_items() if self._get_page_items else []
+        n = min(len(items), GRID_COLS * GRID_ROWS)
+        slot_idx = 0 if direction == +1 else n
+        if self._on_drop_app:
+            self._on_drop_app(app_path, slot_idx)
+
+    # ---- 辅助：计算插入位置和光标 ----
+    def _calc_insert_visuals(self, pos: QPoint):
+        items = self._get_page_items() if self._get_page_items else []
+        n = min(len(items), GRID_COLS * GRID_ROWS)
+        if n == 0:
+            cell = self._cell_rect(0, 0)
+            line_x = cell.left()
+            return 0, line_x, cell.top(), cell.bottom()
+
+        best_idx = None
+        best_dx = 10 ** 9
+        target_cell = None
+        for idx in range(GRID_COLS * GRID_ROWS):
+            row = idx // GRID_COLS
+            col = idx % GRID_COLS
+            if row >= GRID_ROWS:
+                break
+            rect = self._cell_rect(row, col)
+            x_left = rect.left()
+            dx = abs(pos.x() - x_left)
+            if rect.top() - ICON_H // 2 <= pos.y() <= rect.bottom() + ICON_H // 2:
+                dx -= 50
+            if dx < best_dx:
+                best_dx = dx
+                best_idx = idx
+                target_cell = rect
+
+        # 处理最后一个插入位置（右下角）
+        if n > 0:
+            last_row = (n - 1) // GRID_COLS
+            last_col = (n - 1) % GRID_COLS
+            last_rect = self._cell_rect(last_row, last_col)
+            # 判断鼠标是否在最后一个格子的右侧一定范围内
+            if (
+                    last_rect.left() + last_rect.width() <= pos.x() <= last_rect.left() + last_rect.width() + ICON_W // 2 and
+                    last_rect.top() - ICON_H // 2 <= pos.y() <= last_rect.bottom() + ICON_H // 2):
+                # 插入到最后
+                return n, last_rect.right(), last_rect.top(), last_rect.bottom()
+
+        if best_idx is None:
+            return None, None, None, None
+
+        # 主界面apps区约束
+        if self._clamp_to_app_zone and self._accept_groups:
+            first_app_slot, last_app_slot = self._page_app_slot_range(items)
+            if first_app_slot is None:
+                return None, None, None, None
+            best_idx = max(first_app_slot, min(best_idx, last_app_slot + 1))
+
+        line_x = target_cell.left()
+        return best_idx, line_x, target_cell.top(), target_cell.bottom()
+
+    def _cell_rect(self, row: int, col: int) -> QRect:
+        """
+        使用网格内现有小部件的几何与布局间距推断单元格位置。
+        为稳妥：以第一行已有的任意控件为基准推算格子宽高与间距。
+        如该行为空，则使用默认 ICON_W/H 和布局 spacing。
+        """
+        layout = self.parent().layout() if self.parent() else None
+        # 直接根据已有控件几何推算
+        children = [w for w in self.findChildren(QWidget) if w is not self.overlay]
+        sample = None
+        for w in children:
+            if isinstance(w, (AppButton, GroupButton, EmptyButton)):
+                sample = w
+                break
+        if sample:
+            cell_w = sample.width()
+            cell_h = sample.height()
+        else:
+            cell_w, cell_h = ICON_W, ICON_H
+
+        grid_layout = None
+        if hasattr(self.parent(), "grid_layout"):
+            grid_layout = getattr(self.parent(), "grid_layout")
+        hgap = grid_layout.horizontalSpacing() if grid_layout and grid_layout.horizontalSpacing() >= 0 else 10
+        vgap = grid_layout.verticalSpacing() if grid_layout and grid_layout.verticalSpacing() >= 0 else 10
+        m = grid_layout.contentsMargins() if grid_layout else QMargins(0, 0, 0, 0)
+        left = m.left() + col * (cell_w + hgap)
+        top = m.top() + row * (cell_h + vgap)
+        return QRect(left, top, cell_w, cell_h)
+
+    def _page_app_slot_range(self, items):
+        """
+        对主界面页：返回当前页内 apps 段的 slot 范围（first, last）。
+        items: 当前页 [('group'|'app', obj), ...]
+        """
+        first = None
+        last = None
+        for idx, (typ, _) in enumerate(items[:GRID_COLS * GRID_ROWS]):
+            if typ == 'app':
+                if first is None:
+                    first = idx
+                last = idx
+        return first, last
+
+    # ---- 自动翻页逻辑 ----
+    def _maybe_start_auto_page(self, pos: QPoint) -> bool:
+        w = self.width()
+        if pos.x() <= AUTO_PAGE_EDGE_PX:
+            self._auto_page_dir = -1
+            if not self._auto_page_timer.isActive():
+                self._auto_page_timer.start(AUTO_PAGE_DELAY_MS)
+            return True
+        elif pos.x() >= w - AUTO_PAGE_EDGE_PX:
+            self._auto_page_dir = +1
+            if not self._auto_page_timer.isActive():
+                self._auto_page_timer.start(AUTO_PAGE_DELAY_MS)
+            return True
+        else:
+            if self._auto_page_timer.isActive():
+                self._auto_page_timer.stop()
+            self._auto_page_dir = 0
+            return False
+
+    def _do_auto_page(self):
+        if self._auto_page_dir != 0 and self._request_page_change:
+            self._request_page_change(self._auto_page_dir)
+        self._auto_page_dir = 0
+
+    def _ensure_overlay(self):
+        # overlay 失效或已被 Qt 删除时重建
+        recreate = False
+        if not hasattr(self, "overlay") or self.overlay is None:
+            recreate = True
+        else:
+            try:
+                _ = self.overlay.isVisible()
+            except RuntimeError:
+                recreate = True
+        if recreate:
+            self.overlay = InsertCursorOverlay(self)
 
 
 class UpdateCheckWorker(QThread):
@@ -1607,13 +1956,59 @@ class AppButton(QPushButton):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
 
+        # 拖拽/点击判定状态
+        self._press_pos = None
+        self._dragging = False
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            subprocess.Popen(['open', self.app_info['path']])
-            if self.main_window:
-                self.main_window.close_main_window()  # 保证恢复 Dock
-        else:
-            super().mousePressEvent(event)
+            # 只记录，不启动
+            self._press_pos = event.position()
+            self._dragging = False
+            event.accept()
+            return
+        # 其它按键（右键等）维持原行为
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._press_pos is not None and not self._dragging:
+            # 判断是否进入拖拽
+            if (event.position() - self._press_pos).manhattanLength() > QApplication.startDragDistance():
+                self._dragging = True
+                self.startDrag()
+                # 拖拽开始后，不交给父类处理，避免误触发点击等
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            try:
+                # 如果按下过，且没有发生拖拽，且移动未超过阈值 → 视为点击，才启动
+                if self._press_pos is not None and not self._dragging:
+                    if (event.position() - self._press_pos).manhattanLength() <= QApplication.startDragDistance():
+                        # 真正启动 app（与原先 mousePress 的逻辑相同）
+                        subprocess.Popen(['open', self.app_info['path']])
+                        if self.main_window:
+                            self.main_window.close_main_window()
+                event.accept()
+            finally:
+                # 收尾复位
+                self._press_pos = None
+                self._dragging = False
+            return
+        super().mouseReleaseEvent(event)
+
+    def startDrag(self):
+        # 构造拖拽对象
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setText(self.app_info['path'])  # 唯一标识
+        drag.setMimeData(mime)
+        # 拖拽显示的图标
+        pm = self.app_info['icon'].pixmap(64, 64)
+        drag.setPixmap(pm)
+        # 触发拖拽（Move 意味着排序）
+        drag.exec(Qt.DropAction.MoveAction)
 
     def show_context_menu(self, pos):
         menu = QMenu(self)
@@ -2190,7 +2585,7 @@ class GroupWidget(QWidget):
         ''')
         self.layout.addWidget(self.name_label)
         self.name_label.mouseDoubleClickEvent = self.edit_name
-        self.grid_widget = QWidget()
+        self.grid_widget = AppGridWidget()
         self.grid_widget.setStyleSheet('''
             background-color: transparent;
             border: 0px;
@@ -2198,6 +2593,8 @@ class GroupWidget(QWidget):
         self.grid_widget.setMinimumHeight(5 * 150)
         self.grid_widget.setMinimumWidth(content_width)
         self.layout.addWidget(self.grid_widget)
+
+        self.grid_layout = QGridLayout(self.grid_widget)
 
         self.page_indicator = QHBoxLayout()
         self.page_indicator.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2259,10 +2656,58 @@ class GroupWidget(QWidget):
         self._reset_scroll_timer.setSingleShot(True)
         self._reset_scroll_timer.timeout.connect(self._reset_scroll)
 
+        def _get_page_items():
+            start = self.current_page * self.items_per_page
+            end = start + self.items_per_page
+            return [('app', a) for a in self.group['apps'][start:end]]
+
+        def _on_drop_app(app_path: str, slot_index_on_page: int):
+            self.on_drop_reorder_in_group(app_path, slot_index_on_page)
+
+        def _request_page_change(direction: int):
+            total_pages = max(1, (len(self.group['apps']) + self.items_per_page - 1) // self.items_per_page)
+            target = self.current_page + (1 if direction > 0 else -1)
+            if 0 <= target < total_pages:
+                self.goto_page(target)
+
+        self.grid_widget.configure(
+            get_page_items=_get_page_items,
+            on_drop_app=_on_drop_app,
+            request_page_change=_request_page_change,
+            accept_groups=False,
+            clamp_to_app_zone=False,
+            enable_drag=True  # 组内允许拖拽
+        )
+
     def display_apps(self, apps, page=0):
-        for w in self.grid_widget.findChildren(QWidget):
-            w.setParent(None)
-            w.deleteLater()
+        # 安全清理布局和所有子控件，避免残留和重复删除
+        grid_layout = self.grid_layout
+        grid_widget = self.grid_widget
+
+        # 先移除布局项
+        for i in reversed(range(grid_layout.count())):
+            w = grid_layout.itemAt(i).widget()
+            try:
+                if w is not None:
+                    w.setParent(None)
+                    w.deleteLater()
+            except RuntimeError:
+                pass
+
+        # 再保险：删除 grid_widget 下残留子控件，但跳过 overlay
+        for w in grid_widget.findChildren(QWidget):
+            if w is grid_widget:
+                continue
+            # 跳过 InsertCursorOverlay
+            if w.objectName() == "insertOverlay":
+                continue
+            # 某些情况下 isinstance 判断更直观：
+            # if isinstance(w, InsertCursorOverlay): continue
+            try:
+                w.setParent(None)
+                w.deleteLater()
+            except RuntimeError:
+                pass
         apps_per_row = 7
         btn_size = 120
         row_height = 150
@@ -2691,6 +3136,37 @@ class GroupWidget(QWidget):
         anim_group_out.start()
         self.anim = anim_group_out
 
+    def on_drop_reorder_in_group(self, app_path: str, slot_index_on_page: int):
+        # 找源 app
+        src_idx = None
+        for i, a in enumerate(self.group['apps']):
+            if a['path'] == app_path:
+                src_idx = i
+                break
+        if src_idx is None:
+            return
+        src_app = self.group['apps'][src_idx]
+
+        # 计算目标全局插入位置
+        page_start = self.current_page * self.items_per_page
+        target = page_start + slot_index_on_page
+        target = max(0, min(target, len(self.group['apps'])))
+
+        # 移除原位置，插入新位置（注意：移除后索引偏移）
+        del self.group['apps'][src_idx]
+        if target > src_idx:
+            target -= 1
+        self.group['apps'].insert(target, src_app)
+
+        # 组缩略图更新
+        self.group['icon'] = create_group_icon(self.group['apps'])
+        save_groups(self.main_window.groups)
+
+        # 刷新本组页面
+        self.display_apps(self.group['apps'], self.current_page)
+        # 主界面也需要刷新（因为组缩略图变了）
+        self.main_window.display_apps(self.main_window.filtered_apps, self.main_window.current_page)
+
 
 class Window(AcrylicWindow):
     def __init__(self, parent=None):
@@ -2763,7 +3239,7 @@ class MainContentWidget(QWidget):
         self.search_widget.setLayout(search_layout)
         self.search_widget.setFixedHeight(40)
 
-        self.grid_widget = QWidget()
+        self.grid_widget = AppGridWidget()
         self.grid_layout = QGridLayout(self.grid_widget)
 
         self.page_indicator = QHBoxLayout()
@@ -2793,6 +3269,35 @@ class MainContentWidget(QWidget):
         self.groups = groups
         self.main_window = main_window
         self.search_bar.textChanged.connect(self.main_window.filter_apps)
+
+        # 配置拖拽回调（主界面：包含 groups，且 clamp 到 apps 区域）
+        def _get_page_items():
+            # 与 LaunchpadWindow.display_apps 相同的来源
+            is_searching = bool(self.search_bar.text().strip())
+            if is_searching:
+                start = self.main_window.current_page * self.main_window.items_per_page
+                end = start + self.main_window.items_per_page
+                return [('app', a) for a in self.main_window.filtered_apps[start:end]]
+            else:
+                start = self.main_window.current_page * self.main_window.items_per_page
+                end = start + self.main_window.items_per_page
+                return self.main_window.main_order[start:end]
+
+        def _on_drop_app(app_path: str, slot_index_on_page: int):
+            self.main_window.on_drop_reorder_in_main(app_path, slot_index_on_page)
+
+        def _request_page_change(direction: int):
+            target = self.main_window.current_page + (1 if direction > 0 else -1)
+            self.main_window.goto_page(target)
+
+        self.grid_widget.configure(
+            get_page_items=_get_page_items,
+            on_drop_app=_on_drop_app,
+            request_page_change=_request_page_change,
+            accept_groups=True,
+            clamp_to_app_zone=True,
+            enable_drag=False  # 禁用主界面拖拽
+        )
 
 
 class LaunchpadWindow(QWidget):
@@ -3106,78 +3611,84 @@ class LaunchpadWindow(QWidget):
         grid_layout = self.main_content.grid_layout
         grid_widget = self.main_content.grid_widget
 
-        # 彻底清理
+        # 先移除布局项
         for i in reversed(range(grid_layout.count())):
             w = grid_layout.itemAt(i).widget()
-            if w:
-                w.setParent(None)
-                w.deleteLater()
-        # 防止历史绝对定位残留（保险）
+            try:
+                if w is not None:
+                    w.setParent(None)
+                    w.deleteLater()
+            except RuntimeError:
+                pass
+
+        # 再保险：删除 grid_widget 下残留子控件，但跳过 overlay
         for w in grid_widget.findChildren(QWidget):
             if w is grid_widget:
                 continue
-            w.setParent(None)
-            w.deleteLater()
+            if w.objectName() == "insertOverlay":
+                continue
+            try:
+                w.setParent(None)
+                w.deleteLater()
+            except RuntimeError:
+                pass
 
         start = page * self.items_per_page
         end = start + self.items_per_page
 
-        # 判断是否在搜索
         is_searching = bool(self.main_content.search_bar.text().strip())
         if is_searching:
-            # 只显示搜索到的app
             page_items = [('app', app) for app in apps[start:end]]
         else:
-            # 正常显示 group + app
             page_items = self.main_order[start:end]
 
-        # 常量（按你现有的）
+        # 常量
         MAX_COLS = 7
-        MAX_ROWS = 5
         ICON_W = 140
-        ICON_H = 140
+        MAX_ROWS = 5
+        MIN_HGAP, MAX_HGAP = 10, ICON_W
 
-        # —— 仅在 compact 模式下：动态计算左右内边距和水平间距 —— #
+        n = min(len(page_items), MAX_COLS * MAX_ROWS)
+        used_cols = min(MAX_COLS, max(1, n))
+        m = grid_layout.contentsMargins()
+        top_m, bot_m = m.top(), m.bottom()
+        avail_w = max(0, grid_widget.width() - m.left() - m.right())
+
+        # 1) 基准 hgap：始终按“满一行”来计算（不会因为搜索变少而改变）
+        if MAX_COLS > 1:
+            possible_gap_full = max(MIN_HGAP, (avail_w - MAX_COLS * ICON_W) // (MAX_COLS - 1))
+            hgap_base = min(MAX_HGAP, possible_gap_full)
+        else:
+            hgap_base = MIN_HGAP
+
         if getattr(self, 'compact_mode', False):
-            n = min(len(page_items), MAX_COLS * MAX_ROWS)
-            used_cols = min(MAX_COLS, max(1, n))
-
-            # 取当前垂直边距以保持不变
-            m = grid_layout.contentsMargins()
-            top_m, bot_m = m.top(), m.bottom()
-
-            # 允许的水平间距：不超过一个图标宽度；给个下限防止太挤
-            MIN_HGAP, MAX_HGAP = 10, ICON_W
-
-            # 可用宽度（不含当前左右内边距）
-            avail_w = max(0, grid_widget.width() - m.left() - m.right())
-
-            if used_cols > 1:
-                possible_gap = max(MIN_HGAP, (avail_w - used_cols * ICON_W) // (used_cols - 1))
-                hgap = min(MAX_HGAP, possible_gap)
-            else:
-                hgap = 0
-
-            # 本页内容总宽度（按本页有效列数）
-            content_w = used_cols * ICON_W + (used_cols - 1) * hgap
-
-            # 左右内边距用于“把内容挤到中间”
+            hgap = hgap_base
+            content_w = MAX_COLS * ICON_W + (MAX_COLS - 1) * hgap
             side_margin = max(0, (grid_widget.width() - content_w) // 2)
-
-            # 应用：只改左右 margin 与水平 spacing；上下保持不动
             grid_layout.setContentsMargins(side_margin, top_m, side_margin, bot_m)
             grid_layout.setHorizontalSpacing(hgap)
+            # if is_searching and used_cols < MAX_COLS:
+            #     # 搜索且不满一行：靠左对齐 + 用满行的基准间距
+            #     hgap = hgap_base
+            #     grid_layout.setContentsMargins(0, top_m, 0, bot_m)
+            #     grid_layout.setHorizontalSpacing(hgap)
+            # else:
+            #     # 非搜索或满一行：内容居中
+            #     hgap = hgap_base
+            #     content_w = used_cols * ICON_W + (used_cols - 1) * hgap
+            #     side_margin = max(0, (grid_widget.width() - content_w) // 2)
+            #     grid_layout.setContentsMargins(side_margin, top_m, side_margin, bot_m)
+            #     grid_layout.setHorizontalSpacing(hgap)
         else:
-            # 正常模式：完全按你原来的布局表现
-            # 恢复“默认水平间距 + 左右边距=0”，不碰上下边距
+            # 正常模式
             m = grid_layout.contentsMargins()
             grid_layout.setContentsMargins(0, m.top(), 0, m.bottom())
-            grid_layout.setHorizontalSpacing(-1)  # -1 使用 style 默认
+            grid_layout.setHorizontalSpacing(-1)
 
-        # ———— 下面保持原始摆放逻辑（不变） ———— #
+        # 摆放按钮
         for idx, (typ, obj) in enumerate(page_items):
-            row, col = divmod(idx, 7)
-            if row >= 5:
+            row, col = divmod(idx, MAX_COLS)
+            if row >= MAX_ROWS:
                 break
             if typ == 'group':
                 btn = GroupButton(obj, self.main_content.grid_widget, main_window=self)
@@ -3187,14 +3698,14 @@ class LaunchpadWindow(QWidget):
 
         # 补齐空白按钮
         total = len(page_items)
-        for idx in range(total, 35):
-            row, col = divmod(idx, 7)
-            if row >= 5:
+        for idx in range(total, MAX_COLS * MAX_ROWS):
+            row, col = divmod(idx, MAX_COLS)
+            if row >= MAX_ROWS:
                 break
             btn = EmptyButton(main_window=self, parent=self.main_content.grid_widget)
             grid_layout.addWidget(btn, row, col)
 
-        # 指示器数量也要区分
+        # 指示器数量
         if is_searching:
             self.update_page_indicator(len(apps))
         else:
@@ -4800,6 +5311,90 @@ class LaunchpadWindow(QWidget):
                 f.write("1" if enabled else "0")
         except Exception:
             pass
+
+    def _first_app_global_index(self):
+        """
+        返回 main_order 中第一个 ('app', ...) 的全局索引；若没有，返回 len(groups)
+        """
+        for i, (typ, obj) in enumerate(self.main_order):
+            if typ == 'app':
+                return i
+        # 全是 group 的情况：apps 段从 len(groups) 开始
+        groups_count = sum(1 for typ, _ in self.main_order if typ == 'group')
+        return groups_count
+
+    def _last_app_global_index(self):
+        idx = -1
+        for i, (typ, obj) in enumerate(self.main_order):
+            if typ == 'app':
+                idx = i
+        return idx
+
+    def on_drop_reorder_in_main(self, app_path: str, slot_index_on_page: int):
+        """
+        在当前页 slot_index_on_page 处插入 app（仅限 apps 段），保证：所有 group 在前。
+        允许跨页（slot 索引为“页内索引”）
+        """
+        # 找源 app
+        src_app = None
+        for a in self.apps:
+            if a['path'] == app_path:
+                src_app = a
+                break
+        if not src_app:
+            return
+
+        # 计算目标“页内 -> 全局 apps 段”位置
+        page_start = self.current_page * self.items_per_page
+        # 当前页 items（含 group + app 或仅 app）
+        is_searching = bool(self.main_content.search_bar.text().strip())
+        if is_searching:
+            page_items = [('app', a) for a in self.filtered_apps[page_start:page_start + self.items_per_page]]
+        else:
+            page_items = self.main_order[page_start:page_start + self.items_per_page]
+
+        # 求出当前页内 apps 段的“起始全局索引”
+        first_app_global = self._first_app_global_index()
+        # 计算 slot_index_on_page 相对于“page_start”的偏移，转成全局 slot
+        target_global_slot = page_start + slot_index_on_page
+
+        # 约束：不能落到 groups 段
+        if target_global_slot < first_app_global:
+            target_global_slot = first_app_global
+
+        # 将“目标全局 slot”转换为“目标在 apps 段中的绝对插入索引”
+        apps_global_positions = [i for i, (typ, obj) in enumerate(self.main_order) if typ == 'app']
+        if not apps_global_positions:
+            # 当前没有 apps：追加到 group 之后
+            insert_pos_global = first_app_global
+        else:
+            # 根据 target_global_slot 定位 apps 段中的插入位置（前驱/后继）
+            insert_pos_global = first_app_global
+            for gi in apps_global_positions:
+                if gi < target_global_slot:
+                    insert_pos_global = gi + 1
+
+        # 从 main_order 中移除源 app
+        self.main_order = [(typ, obj) for (typ, obj) in self.main_order if not (typ == 'app' and obj is src_app)]
+        # 重新计算“现在”的 first_app_global（移除后 groups 段长度不变）
+        first_app_global = self._first_app_global_index()
+        last_app_global = self._last_app_global_index()
+        if insert_pos_global < first_app_global:
+            insert_pos_global = first_app_global
+        if last_app_global >= 0 and insert_pos_global > last_app_global + 1:
+            insert_pos_global = last_app_global + 1
+
+        # 插入
+        self.main_order.insert(insert_pos_global, ('app', src_app))
+        self.save_current_order()
+
+        # 维护 filtered_apps：保证未分组 apps 的列表顺序与 main_order 中 apps 顺序一致
+        ordered_paths = [obj['path'] for typ, obj in self.main_order if typ == 'app']
+        path_to_app = {a['path']: a for a in self.apps if a['path'] in ordered_paths}
+        self.filtered_apps = [path_to_app[p] for p in ordered_paths if p in path_to_app]
+
+        # 刷新当前页
+        self.display_apps(self.filtered_apps, self.current_page)
 
 
 class WindowAbout(QWidget):  # 增加说明页面(About)

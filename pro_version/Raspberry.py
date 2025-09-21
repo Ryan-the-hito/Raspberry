@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QGridLayout, QPushButton, QLineEdit, QMenu, QLabel, QHBoxLayout, QSizePolicy, QMenuBar, QMessageBox, QFileDialog, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QDialog, QTextEdit, QToolButton, QProgressBar
 )
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QFont, QPalette, QColor, QGuiApplication, QPainterPath, QRegion, QMouseEvent, QTextOption, QFontMetrics, QLinearGradient, QPen, QBrush, QAction, QSurfaceFormat, QCursor
-from PyQt6.QtCore import Qt, QPropertyAnimation, QRect, pyqtSignal, QSize, QPoint, QRectF, QTimer, QThread, QEasingCurve, QParallelAnimationGroup, QAbstractAnimation, QEvent, QPointF, QCoreApplication, QElapsedTimer, QEventLoop, QTranslator, QLocale, QLibraryInfo
+from PyQt6.QtCore import Qt, QPropertyAnimation, QRect, pyqtSignal, QSize, QPoint, QRectF, QTimer, QThread, QEasingCurve, QParallelAnimationGroup, QAbstractAnimation, QEvent, QPointF, QCoreApplication, QElapsedTimer, QEventLoop, QTranslator, QLocale, QLibraryInfo, pyqtSlot
 from qframelesswindow import AcrylicWindow, FramelessWindow, TitleBar, StandardTitleBar
 import hashlib
 import sys
@@ -29,6 +29,7 @@ import urllib3
 import logging
 import requests
 import re
+from PyQt6 import sip
 from bs4 import BeautifulSoup
 import html2text
 if sys.platform == "darwin":
@@ -44,7 +45,7 @@ os.makedirs(ICON_CACHE_DIR, exist_ok=True)
 APP_PATHS_FILE = os.path.expanduser("~/.launchpad_app_paths.json")
 APP_ORDER_FILE = os.path.expanduser("~/.launchpad_app_order.json")
 MAIN_ORDER_FILE = os.path.expanduser("~/.launchpad_main_order.json")
-VERSION = "0.0.12"
+VERSION = "0.0.13"
 NAME = 'Raspberry Pro'
 
 os.environ["QT_QUICK_BACKEND"] = "metal"
@@ -503,6 +504,7 @@ def save_groups(groups):
     with open(GROUPS_FILE, 'w') as f:
         json.dump(data, f)
 
+
 def load_groups(apps):
     if not os.path.exists(GROUPS_FILE):
         return []
@@ -641,6 +643,64 @@ def multiline_elide_with_firstline(text, font, max_width, max_lines=2):
         lines.append(text[idx:end].rstrip())
         idx = end
     return '\n'.join(lines)
+
+
+def is_newer_version(latest: str, current: str) -> bool:
+    # 'v0.0.12' vs 'v0.0.11'
+    def parse(v: str):
+        return [int(x) for x in v.lstrip('vV').split('.')]
+    try:
+        return parse(latest) > parse(current)
+    except Exception:
+        return False
+
+
+def safe_delete_widget(w):
+    try:
+        if w is not None and not sip.isdeleted(w):
+            # 先断开父子关系，再让 Qt 异步回收
+            w.setParent(None)
+            w.deleteLater()
+    except RuntimeError:
+        pass
+
+
+class UpdateCheckWorker(QThread):
+    update_available = pyqtSignal(str)  # latest version, e.g., 'v0.0.13'
+    checked_ok = pyqtSignal(str)        # latest version (even if not newer),用于日志或状态
+    checked_error = pyqtSignal(str)     # error message
+
+    def __init__(self, current_version: str, interval_seconds: int = 86400, parent=None):
+        super().__init__(parent)
+        self._running = True
+        self.current_version = current_version  # e.g., 'v0.0.12'
+        self.interval_seconds = interval_seconds
+
+    def stop(self):
+        self._running = False
+
+    def run(self):
+        # 循环：只要应用在运行，就每隔 interval 检查一次
+        while self._running:
+            try:
+                text = WindowUpdate.fetch_latest_version_text()
+                latest = WindowUpdate.extract_latest_tag(text) if text else None
+                if latest:
+                    self.checked_ok.emit(latest)
+                    if is_newer_version(latest, 'v' + VERSION):
+                        # 通知主线程有新版本
+                        self.update_available.emit(latest)
+                else:
+                    self.checked_error.emit("No version tag found")
+            except Exception as e:
+                self.checked_error.emit(str(e))
+
+            # 可中断的“休眠”24小时
+            for _ in range(self.interval_seconds):
+                if not self._running:
+                    return
+                self.msleep(1000)
+
 
 
 class AppIndexWorker(QThread):
@@ -2586,37 +2646,46 @@ class GroupWidget(QWidget):
             self.setFocus()
 
     def animate_page_transition(self, new_page, direction="left"):
+        if getattr(self, "_is_animating", False):
+            return
+        self._is_animating = True
+
         grid = self.grid_widget
         old_btns = [w for w in grid.findChildren(AppButton)]
+
         if not old_btns:
             self.display_apps(self.group['apps'], new_page)
+            self._is_animating = False
             return
 
         screen_width = self.width()
         speed = 6000
         anim_group_out = QParallelAnimationGroup(self)
+
         for btn in old_btns:
+            if sip.isdeleted(btn):
+                continue
             start_pos = btn.pos()
             if direction == "left":
                 end_pos = QPoint(-btn.width(), start_pos.y())
                 distance = start_pos.x() + btn.width()
-            else:  # direction == "right"
+            else:
                 end_pos = QPoint(screen_width + btn.width(), start_pos.y())
                 distance = screen_width - start_pos.x() + btn.width()
-            duration = int(distance / speed * 1000)
+            duration = max(80, int(distance / speed * 1000))
             anim = QPropertyAnimation(btn, b"pos", self)
             anim.setDuration(duration)
             anim.setStartValue(start_pos)
             anim.setEndValue(end_pos)
-            anim.setEasingCurve(QEasingCurve.Type.OutCurve)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
             anim_group_out.addAnimation(anim)
 
         def cleanup_old_btns():
             for btn in old_btns:
-                btn.hide()
-                btn.setParent(None)
-                btn.deleteLater()
+                safe_delete_widget(btn)
+            # 真正换页
             self.display_apps(self.group['apps'], new_page)
+            self._is_animating = False
 
         anim_group_out.finished.connect(cleanup_old_btns)
         anim_group_out.start()
@@ -2710,6 +2779,7 @@ class MainContentWidget(QWidget):
         blay3.setContentsMargins(80, 60, 80, 60)
         blay3.addWidget(self.search_widget)
         blay3.addWidget(self.grid_widget)
+        #blay3.addWidget(self.grid_widget, alignment=Qt.AlignmentFlag.AlignHCenter)
         blay3.addWidget(self.page_indicator_widget, alignment=Qt.AlignmentFlag.AlignHCenter)
         w3.setLayout(blay3)
         #w3.setObjectName("Main")
@@ -2728,6 +2798,8 @@ class MainContentWidget(QWidget):
 class LaunchpadWindow(QWidget):
     def __init__(self, apps):
         super().__init__()
+        self.compact_mode = self.read_compact_mode_setting()  # or False
+
         screen = QApplication.primaryScreen().geometry()
         self.setGeometry(screen)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
@@ -2772,7 +2844,7 @@ class LaunchpadWindow(QWidget):
 
         self.main_content = MainContentWidget(self, self.apps, self.groups, self)
         self.main_content.setGeometry(self.geometry())
-        self.display_apps(self.filtered_apps, self.current_page)
+        #self.display_apps(self.filtered_apps, self.current_page)
 
         self.scan_timer = QTimer(self)
         self.scan_timer.timeout.connect(self.start_background_scan)
@@ -2876,6 +2948,14 @@ class LaunchpadWindow(QWidget):
 
         self.menu.addSeparator()
 
+        self.compact_mode_action = QAction(self.tr("🗜 Compact Mode"), self)
+        self.compact_mode_action.setCheckable(True)
+        self.compact_mode_action.setChecked(self.compact_mode)
+        self.compact_mode_action.triggered.connect(self.toggle_compact_mode)
+        self.menu.addAction(self.compact_mode_action)
+
+        self.menu.addSeparator()
+
         # 新增菜单项：运行 lporg
         self.run_lporg_action = QAction(self.tr("▶️ Back up Launchpad groups to Raspberry"), self)
         self.menu.addAction(self.run_lporg_action)
@@ -2919,6 +2999,15 @@ class LaunchpadWindow(QWidget):
             self.lang_menu.addAction(act)
 
         self.clear_cache_worker = None
+
+        # 你已有的 self.win_update = WindowUpdate()
+        self.win_update = WindowUpdate()
+        # 启动自动更新线程（24h = 86400秒）
+        self.update_check_worker = UpdateCheckWorker(current_version='v' + VERSION, interval_seconds=86400)
+        self.update_check_worker.update_available.connect(self.on_update_available)  # 主线程槽
+        self.update_check_worker.checked_ok.connect(self.on_update_checked_ok)  # 可选：日志或无感刷新
+        self.update_check_worker.checked_error.connect(self.on_update_checked_error)  # 可选：日志
+        self.update_check_worker.start()
 
         # 滑动翻页
         self._cooldown = False
@@ -3015,8 +3104,21 @@ class LaunchpadWindow(QWidget):
 
     def display_apps(self, apps, page=0):
         grid_layout = self.main_content.grid_layout
+        grid_widget = self.main_content.grid_widget
+
+        # 彻底清理
         for i in reversed(range(grid_layout.count())):
-            grid_layout.itemAt(i).widget().setParent(None)
+            w = grid_layout.itemAt(i).widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+        # 防止历史绝对定位残留（保险）
+        for w in grid_widget.findChildren(QWidget):
+            if w is grid_widget:
+                continue
+            w.setParent(None)
+            w.deleteLater()
+
         start = page * self.items_per_page
         end = start + self.items_per_page
 
@@ -3029,6 +3131,50 @@ class LaunchpadWindow(QWidget):
             # 正常显示 group + app
             page_items = self.main_order[start:end]
 
+        # 常量（按你现有的）
+        MAX_COLS = 7
+        MAX_ROWS = 5
+        ICON_W = 140
+        ICON_H = 140
+
+        # —— 仅在 compact 模式下：动态计算左右内边距和水平间距 —— #
+        if getattr(self, 'compact_mode', False):
+            n = min(len(page_items), MAX_COLS * MAX_ROWS)
+            used_cols = min(MAX_COLS, max(1, n))
+
+            # 取当前垂直边距以保持不变
+            m = grid_layout.contentsMargins()
+            top_m, bot_m = m.top(), m.bottom()
+
+            # 允许的水平间距：不超过一个图标宽度；给个下限防止太挤
+            MIN_HGAP, MAX_HGAP = 10, ICON_W
+
+            # 可用宽度（不含当前左右内边距）
+            avail_w = max(0, grid_widget.width() - m.left() - m.right())
+
+            if used_cols > 1:
+                possible_gap = max(MIN_HGAP, (avail_w - used_cols * ICON_W) // (used_cols - 1))
+                hgap = min(MAX_HGAP, possible_gap)
+            else:
+                hgap = 0
+
+            # 本页内容总宽度（按本页有效列数）
+            content_w = used_cols * ICON_W + (used_cols - 1) * hgap
+
+            # 左右内边距用于“把内容挤到中间”
+            side_margin = max(0, (grid_widget.width() - content_w) // 2)
+
+            # 应用：只改左右 margin 与水平 spacing；上下保持不动
+            grid_layout.setContentsMargins(side_margin, top_m, side_margin, bot_m)
+            grid_layout.setHorizontalSpacing(hgap)
+        else:
+            # 正常模式：完全按你原来的布局表现
+            # 恢复“默认水平间距 + 左右边距=0”，不碰上下边距
+            m = grid_layout.contentsMargins()
+            grid_layout.setContentsMargins(0, m.top(), 0, m.bottom())
+            grid_layout.setHorizontalSpacing(-1)  # -1 使用 style 默认
+
+        # ———— 下面保持原始摆放逻辑（不变） ———— #
         for idx, (typ, obj) in enumerate(page_items):
             row, col = divmod(idx, 7)
             if row >= 5:
@@ -3614,24 +3760,42 @@ class LaunchpadWindow(QWidget):
             group['apps'].remove(app_info)
             group['icon'] = create_group_icon(group['apps'])
             save_groups(self.groups)
-        # 检查是否还属于其他组
-        in_other_group = any(
-            app_info in g['apps'] for g in self.groups if g is not group
-        )
-        # 只有不属于其他组才放回主界面
-        if not in_other_group and app_info not in self.filtered_apps:
-            self.filtered_apps.append(app_info)
-            # 先从 main_order 移除所有该 app
-            self.main_order = [(typ, obj) for (typ, obj) in self.main_order if not (typ == 'app' and obj == app_info)]
-            # 插入到所有 app 类型的末尾
+
+        # 如果仍在其他组，就不放回主界面
+        in_other_group = any(app_info in g['apps'] for g in self.groups if g is not group)
+
+        if not in_other_group:
+            # 确保主界面的“未分组软件列表”里有它（追加到末尾）
+            if app_info not in self.filtered_apps:
+                self.filtered_apps.append(app_info)
+
+            # 先从 main_order 移除该 app（避免重复）
+            self.main_order = [
+                (typ, obj) for (typ, obj) in self.main_order
+                if not (typ == 'app' and obj == app_info)
+            ]
+
+            # 计算插入点：放到“所有 group 之后、所有 app 的末尾”
+            last_group_idx = -1
             last_app_idx = -1
             for idx, (typ, obj) in enumerate(self.main_order):
-                if typ == 'app':
+                if typ == 'group':
+                    last_group_idx = idx
+                elif typ == 'app':
                     last_app_idx = idx
+
+            if last_app_idx < last_group_idx:
+                # 没有 app 的情况，让 last_app_idx 退回到最后一个 group
+                last_app_idx = last_group_idx
+
             insert_idx = last_app_idx + 1
             self.main_order.insert(insert_idx, ('app', app_info))
+
             self.save_current_order()
+
+        # 刷新视图
         self.display_apps(self.filtered_apps, self.current_page)
+
         # 如果组窗口还开着，刷新组窗口
         if self.group_widget and self.group_widget.group is group:
             self.group_widget.display_apps(group['apps'], self.group_widget.current_page)
@@ -3674,6 +3838,7 @@ class LaunchpadWindow(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self.adapt_to_screen()  # 每次 show 都刷新几何
+        self.display_apps(self.filtered_apps, self.current_page)
         self.prepare_icons_for_animation()
         if getattr(self, '_force_show_dock', False):
             self.show_dock()
@@ -4319,54 +4484,58 @@ class LaunchpadWindow(QWidget):
                     msg.exec()
 
     def animate_page_transition(self, next_page_items, direction="left"):
+        # 动画重入保护
+        if getattr(self, "_is_animating", False):
+            return
+        self._is_animating = True
+
         grid_layout = self.main_content.grid_layout
         old_btns = []
         for i in range(grid_layout.count()):
-            btn = grid_layout.itemAt(i).widget()
-            if isinstance(btn, (AppButton, GroupButton)):
-                old_btns.append(btn)
+            w = grid_layout.itemAt(i).widget()
+            if isinstance(w, (AppButton, GroupButton)):
+                old_btns.append(w)
 
         if not next_page_items:
             for btn in old_btns:
-                btn.hide()
-                btn.setParent(None)
-                btn.deleteLater()
+                safe_delete_widget(btn)
+            self._is_animating = False
             return
 
-        # 动画：旧按钮平移消失，方向可选
         screen_width = self.width()
         speed = 6000
         anim_group_out = QParallelAnimationGroup(self)
+
         for btn in old_btns:
+            if sip.isdeleted(btn):
+                continue
             start_pos = btn.pos()
             if direction == "left":
                 end_pos = QPoint(-btn.width(), start_pos.y())
                 distance = start_pos.x() + btn.width()
-            else:  # direction == "right"
+            else:
                 end_pos = QPoint(screen_width + btn.width(), start_pos.y())
                 distance = screen_width - start_pos.x() + btn.width()
-            duration = int(distance / speed * 1000)
+            duration = max(80, int(distance / speed * 1000))
             anim = QPropertyAnimation(btn, b"pos", self)
             anim.setDuration(duration)
             anim.setStartValue(start_pos)
             anim.setEndValue(end_pos)
-            anim.setEasingCurve(QEasingCurve.Type.OutCurve)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
             anim_group_out.addAnimation(anim)
 
         def cleanup_old_btns():
+            # 旧按钮可能已被其它路径清理，安全处理
             for btn in old_btns:
-                btn.hide()
-                btn.setParent(None)
-                btn.deleteLater()
-            # 动画结束后，直接显示新一页内容
-            self.display_apps(
-                [obj for typ, obj in next_page_items if typ == 'app'],
-                self.current_page
-            )
+                safe_delete_widget(btn)
+
+            # 动画结束后再统一刷新本页（注意：next_page_items 是 [('group'| 'app', obj), ...]）
+            self.display_apps([obj for typ, obj in next_page_items if typ == 'app'], self.current_page)
+            self._is_animating = False
 
         anim_group_out.finished.connect(cleanup_old_btns)
         anim_group_out.start()
-        self.anim = anim_group_out
+        self.anim = anim_group_out  # 防止被回收
 
     def backup_groups(self):
         # 备份目录
@@ -4561,6 +4730,73 @@ class LaunchpadWindow(QWidget):
     def write_always_hide_dock_setting(self, enabled: bool):
         try:
             with open(self._always_hide_dock_file, "w", encoding="utf-8") as f:
+                f.write("1" if enabled else "0")
+        except Exception:
+            pass
+
+    @pyqtSlot(str)
+    def on_update_available(self, latest: str):
+        # 这里只在主线程里创建窗口或弹窗
+        # 你可以复用已有的 WindowUpdate 或者弹一个你的自定义对话框
+        # 例：用你已有的 RestartMessageBox/CustomMessageBox 风格
+        msg = CustomMessageBox(
+            self.tr(f"New version %n is available. Open release note page?").replace('%n', latest),
+            parent=self,
+            buttons=(self.tr("Open"), self.tr("Later"))
+        )
+        res = msg.exec()
+        if res == 0:
+            webbrowser.open('https://github.com/Ryan-the-hito/Raspberry/releases')
+
+        # 或者你也可以这样：仅在有更新时展示现有的 WindowUpdate 小窗
+        #self.win_update.show()  # 它会 show() 并 checkupdate()，但建议只 show，然后把 latest 显示出来
+
+    @pyqtSlot(str)
+    def on_update_checked_ok(self, latest: str):
+        # 可选：比如在日志里记录或更新某个状态标签（主线程里的标签）
+        #print(f"Checked latest: {latest}")
+        pass
+
+    @pyqtSlot(str)
+    def on_update_checked_error(self, err: str):
+        # 可选：记录错误，不弹框打扰用户
+        #print(f"Check update error: {err}")
+        pass
+
+    def _clear_main_grid(self):
+        grid_layout = self.main_content.grid_layout
+        # 清布局里的
+        for i in reversed(range(grid_layout.count())):
+            w = grid_layout.itemAt(i).widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+        # 保险：再清 grid_widget 的子控件
+        for w in self.main_content.grid_widget.findChildren(QWidget):
+            if w is self.main_content.grid_widget:
+                continue
+            w.setParent(None)
+            w.deleteLater()
+
+    def toggle_compact_mode(self):
+        self.compact_mode = self.compact_mode_action.isChecked()
+        self.write_compact_mode_setting(self.compact_mode)
+        self.display_apps(self.filtered_apps, self.current_page)
+
+    # 仅保存 bool，别保存边距
+    def read_compact_mode_setting(self):
+        path = os.path.expanduser("~/.raspberry_compact_mode")
+        try:
+            if os.path.exists(path):
+                return open(path, "r", encoding="utf-8").read().strip() == "1"
+        except Exception:
+            pass
+        return False
+
+    def write_compact_mode_setting(self, enabled: bool):
+        path = os.path.expanduser("~/.raspberry_compact_mode")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
                 f.write("1" if enabled else "0")
         except Exception:
             pass
@@ -5308,6 +5544,49 @@ class WindowUpdate(QWidget):  # 增加更新页面（Check for Updates）
             alertupdate = self.tr('No Intrenet')
             self.lbl2.setText(alertupdate)
             self.lbl2.adjustSize()
+
+    @staticmethod
+    def fetch_latest_version_text():
+        # 返回页面纯文本，或直接返回最新版本字符串
+        targetURL = 'https://github.com/Ryan-the-hito/Raspberry/releases'
+        try:
+            urllib3.disable_warnings()
+            logging.captureWarnings(True)
+            s = requests.session()
+            s.keep_alive = False
+            response = s.get(targetURL, verify=False, timeout=15)
+            response.encoding = 'utf-8'
+            html_content = response.text
+
+            soup = BeautifulSoup(html_content, "html.parser")
+            for img in soup.find_all("img"):
+                img.decompose()
+            text_maker = html2text.HTML2Text()
+            text_maker.ignore_links = True
+            text_maker.ignore_images = True
+            plain_text = text_maker.handle(str(soup))
+            plain_text_utf8 = plain_text.encode(response.encoding).decode("utf-8")
+
+            for _ in range(10):
+                plain_text_utf8 = (plain_text_utf8
+                                   .replace('\n\n\n\n', '\n\n')
+                                   .replace('\n\n\n', '\n\n')
+                                   .replace('   ', ' ')
+                                   .replace('  ', ' '))
+            return plain_text_utf8
+        except Exception:
+            return None
+
+    @staticmethod
+    def extract_latest_tag(plain_text_utf8: str) -> str | None:
+        # 返回类似 'v0.0.12' 的字符串
+        if not plain_text_utf8:
+            return None
+        pattern2 = re.compile(r'(v\d+\.\d+\.\d+)\sLatest')
+        result = pattern2.findall(plain_text_utf8)
+        if result:
+            return result[0]
+        return None
 
 
 class PermissionInfoWidget(QWidget):

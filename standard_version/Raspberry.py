@@ -7,6 +7,7 @@
 import os
 import math
 import plistlib
+import datetime
 import subprocess
 import json
 import time
@@ -43,7 +44,8 @@ os.makedirs(ICON_CACHE_DIR, exist_ok=True)
 APP_PATHS_FILE = os.path.expanduser("~/.launchpad_app_paths.json")
 APP_ORDER_FILE = os.path.expanduser("~/.launchpad_app_order.json")
 MAIN_ORDER_FILE = os.path.expanduser("~/.launchpad_main_order.json")
-VERSION = "0.0.15"
+DISPLAY_PROFILE_CACHE_FILE = os.path.expanduser("~/.raspberry_display_profiles.json")
+VERSION = "0.0.16"
 NAME = 'Raspberry'
 
 os.environ["QT_QUICK_BACKEND"] = "metal"
@@ -51,6 +53,29 @@ os.environ["QT_QUICK_BACKEND"] = "metal"
 fmt = QSurfaceFormat()
 fmt.setSamples(8)  # 打开 MSAA 多重采样抗锯齿
 QSurfaceFormat.setDefaultFormat(fmt)
+
+
+def load_display_profile_cache():
+    """
+    Persisted auto-compact decisions keyed by screen name + resolution.
+    """
+    try:
+        if os.path.exists(DISPLAY_PROFILE_CACHE_FILE):
+            with open(DISPLAY_PROFILE_CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_display_profile_cache(data: dict):
+    try:
+        with open(DISPLAY_PROFILE_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
 def is_dark_theme(app):
     defaults = NSUserDefaults.standardUserDefaults()
@@ -170,6 +195,24 @@ resource_tarname = "Resources/"
 BasePath = str(os.path.join(base_dir, resource_tarname))
 #BasePath = ''  # test
 #base_dir = ''  # test
+
+
+def clean_env_for_child():
+    """
+    Remove Qt-related env vars so launched apps don't inherit our packaged Qt paths.
+    """
+    env = os.environ.copy()
+    for key in [
+        "QT_PLUGIN_PATH",
+        "QT_QPA_PLATFORM_PLUGIN_PATH",
+        "QT_QUICK_BACKEND",
+        "QT_WEBENGINE_DISABLE_SANDBOX",
+        "QT_SCALE_FACTOR",
+        "DYLD_LIBRARY_PATH",
+        "DYLD_FRAMEWORK_PATH",
+    ]:
+        env.pop(key, None)
+    return env
 
 # copy items from app to basepath
 old_base_path = Path('/Applications/Raspberry.app/Contents/Resources/')
@@ -1156,7 +1199,7 @@ class RestartMessageBox(QWidget):
                     end try
                 end if
                 '''
-            subprocess.Popen(['osascript', '-e', applescript])
+            subprocess.Popen(['osascript', '-e', applescript], env=clean_env_for_child())
         self.result = idx
         self.accept()
 
@@ -1536,7 +1579,7 @@ class AppButton(QPushButton):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            subprocess.Popen(['open', self.app_info['path']])
+            subprocess.Popen(['open', self.app_info['path']], env=clean_env_for_child())
             if self.main_window:
                 self.main_window.close_main_window()  # 保证恢复 Dock
         else:
@@ -1666,7 +1709,10 @@ class AppButton(QPushButton):
             self.main_window.move_app_out_of_group(self.app_info, self.parent_group)
 
     def move_to_trash(self):
-        subprocess.Popen(['osascript', '-e', f'tell app "Finder" to move POSIX file "{self.app_info["path"]}" to trash'])
+        subprocess.Popen(
+            ['osascript', '-e', f'tell app "Finder" to move POSIX file \\"{self.app_info["path"]}\\" to trash'],
+            env=clean_env_for_child()
+        )
         if self.main_window:
             self.main_window.remove_app(self.app_info)
 
@@ -2337,6 +2383,8 @@ class GroupWidget(QWidget):
         return super().eventFilter(obj, event)
 
     def handle_key_event(self, event):
+        if self.main_window and getattr(self.main_window, "new_keyboard_mode", True):
+            return self._handle_key_event_new_mode(event)
         if event.key() == Qt.Key.Key_Escape:
             self.close_group_widget()
             return True
@@ -2377,6 +2425,78 @@ class GroupWidget(QWidget):
                 self.focused_btn.show_context_menu(pos)
             else:
                 # 计算本地和全局坐标
+                local_pos = QPointF(self.focused_btn.rect().center())
+                global_pos = QPointF(self.focused_btn.mapToGlobal(self.focused_btn.rect().center()))
+                mouse_event = QMouseEvent(
+                    QEvent.Type.MouseButtonPress,
+                    local_pos,
+                    global_pos,
+                    Qt.MouseButton.LeftButton,
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier
+                )
+                QApplication.sendEvent(self.focused_btn, mouse_event)
+                mouse_event_release = QMouseEvent(
+                    QEvent.Type.MouseButtonRelease,
+                    local_pos,
+                    global_pos,
+                    Qt.MouseButton.LeftButton,
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier
+                )
+                QApplication.sendEvent(self.focused_btn, mouse_event_release)
+            return True
+        return False
+
+    def _handle_key_event_new_mode(self, event):
+        key = event.key()
+        modifiers = event.modifiers()
+        swap_mod = modifiers & (Qt.KeyboardModifier.ControlModifier |
+                                Qt.KeyboardModifier.AltModifier |
+                                Qt.KeyboardModifier.MetaModifier)
+        shift_mod = modifiers & Qt.KeyboardModifier.ShiftModifier
+
+        if key == Qt.Key.Key_Escape:
+            self.close_group_widget()
+            return True
+        if swap_mod and key == Qt.Key.Key_Left:
+            self.move_focused_btn_left()
+            return True
+        if swap_mod and key == Qt.Key.Key_Right:
+            self.move_focused_btn_right()
+            return True
+        if shift_mod and key == Qt.Key.Key_Left:
+            self.goto_page(max(self.current_page - 1, 0))
+            return True
+        if shift_mod and key == Qt.Key.Key_Right:
+            total_pages = max(1, (len(self.group['apps']) + self.items_per_page - 1) // self.items_per_page)
+            self.goto_page(min(self.current_page + 1, total_pages - 1))
+            return True
+        if key == Qt.Key.Key_Left:
+            self.focus_prev_btn()
+            return True
+        if key == Qt.Key.Key_Right:
+            self.focus_next_btn()
+            return True
+        if key == Qt.Key.Key_Up:
+            self.focus_up_btn()
+            return True
+        if key == Qt.Key.Key_Down:
+            self.focus_down_btn()
+            return True
+        if key == Qt.Key.Key_Space:
+            if shift_mod:
+                self.focus_prev_btn()
+            else:
+                self.focus_next_btn()
+            return True
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if self.focused_btn is None:
+                return False
+            if shift_mod:
+                pos = self.focused_btn.rect().center()
+                self.focused_btn.show_context_menu(pos)
+            else:
                 local_pos = QPointF(self.focused_btn.rect().center())
                 global_pos = QPointF(self.focused_btn.mapToGlobal(self.focused_btn.rect().center()))
                 mouse_event = QMouseEvent(
@@ -2948,6 +3068,29 @@ class LaunchpadWindow(QWidget):
         self.traditional_mode_action.triggered.connect(self.toggle_traditional_mode)
         self.menu.addAction(self.traditional_mode_action)
 
+        # 键盘映射模式（默认启用新的映射）
+        self.new_keyboard_mode = self.read_keyboard_mode_setting()
+        self.new_keyboard_mode_action = QAction(self.tr("⌨️ New keyboard navigation"), self)
+        self.new_keyboard_mode_action.setCheckable(True)
+        self.new_keyboard_mode_action.setChecked(self.new_keyboard_mode)
+        self.new_keyboard_mode_action.triggered.connect(self.toggle_keyboard_mode)
+        self.menu.addAction(self.new_keyboard_mode_action)
+
+        # 关闭时自动清理搜索
+        self.clear_search_on_close = self.read_clear_search_on_close_setting()
+        self.clear_search_on_close_action = QAction(self.tr("🧽 Clear search when closing"), self)
+        self.clear_search_on_close_action.setCheckable(True)
+        self.clear_search_on_close_action.setChecked(self.clear_search_on_close)
+        self.clear_search_on_close_action.triggered.connect(self.toggle_clear_search_on_close)
+        self.menu.addAction(self.clear_search_on_close_action)
+
+        self.menu.addSeparator()
+
+        # 一键按字母排序未分组 App
+        self.sort_alpha_action = QAction(self.tr("🔤 Sort ungrouped apps alphabetically"), self)
+        self.sort_alpha_action.triggered.connect(self.sort_ungrouped_apps_alphabetically)
+        self.menu.addAction(self.sort_alpha_action)
+
         self.menu.addSeparator()
 
         self.reset_all_action = QAction(self.tr("🗑 Reset All Data and Restart"), self)
@@ -3113,6 +3256,7 @@ class LaunchpadWindow(QWidget):
         self._is_animating = False
 
         self._last_screen_width = None
+        self._last_screen_key = None
 
         self.setFocus()
 
@@ -3833,6 +3977,8 @@ class LaunchpadWindow(QWidget):
         return super().eventFilter(obj, event)
 
     def handle_key_event(self, event):
+        if getattr(self, "new_keyboard_mode", True):
+            return self._handle_key_event_new_mode(event)
         if event.key() == Qt.Key.Key_Escape:
             self.close_main_window()
             return True
@@ -3868,6 +4014,77 @@ class LaunchpadWindow(QWidget):
                 self.focused_btn.show_context_menu(pos)
             else:
                 # 计算本地和全局坐标
+                local_pos = QPointF(self.focused_btn.rect().center())
+                global_pos = QPointF(self.focused_btn.mapToGlobal(self.focused_btn.rect().center()))
+                mouse_event = QMouseEvent(
+                    QEvent.Type.MouseButtonPress,
+                    local_pos,
+                    global_pos,
+                    Qt.MouseButton.LeftButton,
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier
+                )
+                QApplication.sendEvent(self.focused_btn, mouse_event)
+                mouse_event_release = QMouseEvent(
+                    QEvent.Type.MouseButtonRelease,
+                    local_pos,
+                    global_pos,
+                    Qt.MouseButton.LeftButton,
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier
+                )
+                QApplication.sendEvent(self.focused_btn, mouse_event_release)
+            return True
+        return False
+
+    def _handle_key_event_new_mode(self, event):
+        key = event.key()
+        modifiers = event.modifiers()
+        swap_mod = modifiers & (Qt.KeyboardModifier.ControlModifier |
+                                Qt.KeyboardModifier.AltModifier |
+                                Qt.KeyboardModifier.MetaModifier)
+        shift_mod = modifiers & Qt.KeyboardModifier.ShiftModifier
+
+        if key == Qt.Key.Key_Escape:
+            self.close_main_window()
+            return True
+        if swap_mod and key == Qt.Key.Key_Left:
+            self.move_focused_btn_left()
+            return True
+        if swap_mod and key == Qt.Key.Key_Right:
+            self.move_focused_btn_right()
+            return True
+        if shift_mod and key == Qt.Key.Key_Left:
+            self.goto_page(max(self.current_page - 1, 0))
+            return True
+        if shift_mod and key == Qt.Key.Key_Right:
+            self.goto_page(min(self.current_page + 1, self.total_pages() - 1))
+            return True
+        if key == Qt.Key.Key_Left:
+            self.focus_prev_btn()
+            return True
+        if key == Qt.Key.Key_Right:
+            self.focus_next_btn()
+            return True
+        if key == Qt.Key.Key_Up:
+            self.focus_up_btn()
+            return True
+        if key == Qt.Key.Key_Down:
+            self.focus_down_btn()
+            return True
+        if key == Qt.Key.Key_Space:
+            if shift_mod:
+                self.focus_prev_btn()
+            else:
+                self.focus_next_btn()
+            return True
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if self.focused_btn is None:
+                return False
+            if shift_mod:
+                pos = self.focused_btn.rect().center()
+                self.focused_btn.show_context_menu(pos)
+            else:
                 local_pos = QPointF(self.focused_btn.rect().center())
                 global_pos = QPointF(self.focused_btn.mapToGlobal(self.focused_btn.rect().center()))
                 mouse_event = QMouseEvent(
@@ -3975,8 +4192,9 @@ class LaunchpadWindow(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        self.adapt_to_screen()  # 每次 show 都刷新几何
-        self.display_apps(self.filtered_apps, self.current_page)
+        rendered = self.adapt_to_screen()  # 每次 show 都刷新几何
+        if not rendered:
+            self.display_apps(self.filtered_apps, self.current_page)
         self.prepare_icons_for_animation()
         if getattr(self, '_force_show_dock', False):
             self.show_dock()
@@ -3986,6 +4204,8 @@ class LaunchpadWindow(QWidget):
         QTimer.singleShot(2000, self.start_background_scan)  # 新增：主UI展示后2秒再扫描一次
 
     def close_main_window(self):
+        if getattr(self, "clear_search_on_close", False) and self.main_content.search_bar.text().strip():
+            self.main_content.search_bar.setText('')
         if not self.isVisible():
             return
         # 防止重复动画
@@ -4119,7 +4339,7 @@ class LaunchpadWindow(QWidget):
             toggle_dock_script = '''
                 tell application "System Events" to set the autohide of dock preferences to true
             '''
-            subprocess.run(["osascript", "-e", toggle_dock_script])
+            subprocess.run(["osascript", "-e", toggle_dock_script], env=clean_env_for_child())
         except Exception as e:
             pass
 
@@ -4130,7 +4350,7 @@ class LaunchpadWindow(QWidget):
             toggle_dock_script = '''
                 tell application "System Events" to set the autohide of dock preferences to false
             '''
-            subprocess.run(["osascript", "-e", toggle_dock_script])
+            subprocess.run(["osascript", "-e", toggle_dock_script], env=clean_env_for_child())
         except Exception as e:
             pass
 
@@ -4542,12 +4762,12 @@ class LaunchpadWindow(QWidget):
     			end tell
     		on error number -128
     			quit application "Raspberry"
-    			delay 1
-    			activate application "Raspberry"
-    		end try
-    	end if
+    		delay 1
+    		activate application "Raspberry"
+    	end try
+   	end if
     	'''
-        subprocess.Popen(['osascript', '-e', applescript])
+        subprocess.Popen(['osascript', '-e', applescript], env=clean_env_for_child())
 
     def run_lporg(self):
         webbrowser.open('https://buymeacoffee.com/ryanthehito/e/451635')
@@ -4615,18 +4835,43 @@ class LaunchpadWindow(QWidget):
         screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
         geo: QRect = screen.geometry()
         screen_width = geo.width()
-        if geo != self.geometry():
+        screen_height = geo.height()
+        screen_key = f"{screen.name() or 'Unknown'}|{screen_width}x{screen_height}"
+
+        geometry_changed = geo != self.geometry()
+        key_changed = (self._last_screen_key != screen_key)
+
+        # 命中缓存时：仅同步几何（如有需要），并通过 check_and_apply_compact_mode 用缓存直接刷新一次
+        cache = load_display_profile_cache()
+        if screen_key in cache:
+            if geometry_changed:
+                self.setGeometry(geo)
+                self.main_content.setGeometry(self.rect())
+                if self.group_widget and self.group_widget.isVisible():
+                    gw = self.group_widget
+                    gw.move((self.width() - gw.width()) // 2,
+                            (self.height() - gw.height()) // 2)
+            self._last_screen_width = screen_width
+            self._last_screen_key = screen_key
+            rendered = self.check_and_apply_compact_mode()  # 利用缓存直接应用/刷新
+            return bool(rendered)
+
+        if geometry_changed:
             self.setGeometry(geo)
             self.main_content.setGeometry(self.rect())
             if self.group_widget and self.group_widget.isVisible():
                 gw = self.group_widget
                 gw.move((self.width() - gw.width()) // 2,
                         (self.height() - gw.height()) // 2)
-            # 只有屏幕宽度变化时才自动判断
-            if self._last_screen_width != screen_width:
-                self._last_screen_width = screen_width
-                self.check_and_apply_compact_mode()
+        # 屏幕信息发生变化（包含分辨率或屏幕名称）时才重新计算/应用
+        already_rendered = False
+        if key_changed or self._last_screen_width != screen_width or geometry_changed:
+            self._last_screen_width = screen_width
+            self._last_screen_key = screen_key
+            already_rendered = self.check_and_apply_compact_mode()
+        if geometry_changed and not already_rendered:
             self.display_apps(self.filtered_apps, self.current_page)
+        return bool(already_rendered)
 
     def read_traditional_mode(self):
         if not os.path.exists(self.TRADITIONAL_MODE_FILE):
@@ -4760,10 +5005,67 @@ class LaunchpadWindow(QWidget):
             w.setParent(None)
             w.deleteLater()
 
+    def sort_ungrouped_apps_alphabetically(self):
+        """
+        Sort ungrouped apps alphabetically (one-time action).
+        """
+        ungrouped_apps = [a for a in self.apps if not any(a in g['apps'] for g in self.groups)]
+        if not ungrouped_apps:
+            return
+        sorted_apps = sorted(ungrouped_apps, key=lambda a: a.get('name', '').lower())
+        groups_in_order = [obj for typ, obj in self.main_order if typ == 'group']
+        self.main_order = [('group', g) for g in groups_in_order] + [('app', a) for a in sorted_apps]
+        self.filtered_apps = sorted_apps
+        self.current_page = 0
+        save_app_order([a['path'] for a in sorted_apps])
+        self.save_current_order()
+        self.display_apps(self.filtered_apps, self.current_page)
+
+    def toggle_keyboard_mode(self):
+        self.new_keyboard_mode = self.new_keyboard_mode_action.isChecked()
+        self.write_keyboard_mode_setting(self.new_keyboard_mode)
+
+    def read_keyboard_mode_setting(self):
+        path = os.path.expanduser("~/.raspberry_keyboard_mode")
+        try:
+            if os.path.exists(path):
+                return open(path, "r", encoding="utf-8").read().strip() != "0"
+        except Exception:
+            pass
+        return True
+
+    def write_keyboard_mode_setting(self, enabled: bool):
+        path = os.path.expanduser("~/.raspberry_keyboard_mode")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("1" if enabled else "0")
+        except Exception:
+            pass
+
+    def toggle_clear_search_on_close(self):
+        self.clear_search_on_close = self.clear_search_on_close_action.isChecked()
+        self.write_clear_search_on_close_setting(self.clear_search_on_close)
+
+    def read_clear_search_on_close_setting(self):
+        path = os.path.expanduser("~/.raspberry_clear_search_on_close")
+        try:
+            if os.path.exists(path):
+                return open(path, "r", encoding="utf-8").read().strip() == "1"
+        except Exception:
+            pass
+        return False
+
+    def write_clear_search_on_close_setting(self, enabled: bool):
+        path = os.path.expanduser("~/.raspberry_clear_search_on_close")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("1" if enabled else "0")
+        except Exception:
+            pass
+
     def toggle_compact_mode(self):
         self.compact_mode = self.compact_mode_action.isChecked()
         self.write_compact_mode_setting(self.compact_mode)
-        self.check_and_apply_compact_mode()  # 新增：自动判断
         self.display_apps(self.filtered_apps, self.current_page)
 
         # 仅保存 bool，别保存边距
@@ -4956,12 +5258,34 @@ class LaunchpadWindow(QWidget):
         enabled = self.auto_compact_mode_action.isChecked()
         self.write_auto_compact_mode_setting(enabled)
         # 立即判断一次
-        self.check_and_apply_compact_mode()
-        self.display_apps(self.filtered_apps, self.current_page)
+        rendered = self.check_and_apply_compact_mode()
+        if not rendered:
+            self.display_apps(self.filtered_apps, self.current_page)
 
     def check_and_apply_compact_mode(self):
         if not self.read_auto_compact_mode_setting():
-            return
+            return False
+
+        screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        cache = load_display_profile_cache()
+        cache_key = None
+        screen_name = "Unknown"
+        screen_width = screen_height = 0
+
+        if screen:
+            geo = screen.geometry()
+            screen_name = screen.name() or "Unknown"
+            screen_width = geo.width()
+            screen_height = geo.height()
+            cache_key = f"{screen_name}|{screen_width}x{screen_height}"
+            cached_profile = cache.get(cache_key)
+            # 如果有缓存，直接应用，不再计算
+            if cached_profile and "compact_mode" in cached_profile:
+                self.compact_mode = bool(cached_profile.get("compact_mode", False))
+                self.compact_mode_action.setChecked(self.compact_mode)
+                self.write_compact_mode_setting(self.compact_mode)
+                self.display_apps(self.filtered_apps, self.current_page)
+                return True
 
         # 先用正常模式布局
         self.compact_mode = False
@@ -4992,6 +5316,17 @@ class LaunchpadWindow(QWidget):
             self.compact_mode_action.setChecked(True)
             self.write_compact_mode_setting(True)
             self.display_apps(self.filtered_apps, self.current_page)
+
+        if cache_key:
+            cache[cache_key] = {
+                "screen_name": screen_name,
+                "width": screen_width,
+                "height": screen_height,
+                "compact_mode": self.compact_mode,
+                "updated_at": datetime.datetime.now().isoformat()
+            }
+            save_display_profile_cache(cache)
+        return True
 
     def get_actual_icon_gap(self):
         grid_layout = self.main_content.grid_layout

@@ -14,7 +14,7 @@ import json
 import time
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QGridLayout, QPushButton, QLineEdit, QMenu, QLabel, QHBoxLayout, QSizePolicy, QMenuBar, QMessageBox, QFileDialog, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QDialog, QTextEdit, QToolButton, QProgressBar, QSlider, QWidgetAction
+    QApplication, QWidget, QVBoxLayout, QGridLayout, QPushButton, QLineEdit, QMenu, QLabel, QHBoxLayout, QSizePolicy, QMenuBar, QMessageBox, QFileDialog, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QDialog, QTextEdit, QToolButton, QProgressBar, QSlider, QWidgetAction, QInputDialog
 )
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QFont, QPalette, QColor, QGuiApplication, QPainterPath, QRegion, QMouseEvent, QTextOption, QFontMetrics, QLinearGradient, QPen, QBrush, QAction, QSurfaceFormat, QCursor, QDrag
 from PyQt6.QtCore import Qt, QPropertyAnimation, QRect, pyqtSignal, QSize, QPoint, QRectF, QTimer, QThread, QEasingCurve, QParallelAnimationGroup, QAbstractAnimation, QEvent, QPointF, QCoreApplication, QElapsedTimer, QEventLoop, QTranslator, QLocale, QLibraryInfo, pyqtSlot, QMargins, QMimeData
@@ -34,7 +34,7 @@ from bs4 import BeautifulSoup
 import html2text
 if sys.platform == "darwin":
     import objc
-    from Foundation import NSObject, NSNotificationCenter, NSSelectorFromString, NSDistributedNotificationCenter, NSUserDefaults
+    from Foundation import NSObject, NSNotificationCenter, NSSelectorFromString, NSDistributedNotificationCenter, NSUserDefaults, NSFileManager
     from AppKit import NSWorkspace, NSImage, NSApp
     from PyQt6.QtGui import QImage
 
@@ -45,7 +45,10 @@ os.makedirs(ICON_CACHE_DIR, exist_ok=True)
 APP_PATHS_FILE = os.path.expanduser("~/.launchpad_app_paths.json")
 APP_ORDER_FILE = os.path.expanduser("~/.launchpad_app_order.json")
 MAIN_ORDER_FILE = os.path.expanduser("~/.launchpad_main_order.json")
-VERSION = "0.0.15"
+DISPLAY_NAME_MAP_FILE = os.path.expanduser("~/.raspberry_display_names.json")
+ALIAS_NAME_MAP_FILE = os.path.expanduser("~/.raspberry_alias_names.json")
+DISPLAY_PROFILE_CACHE_FILE = os.path.expanduser("~/.raspberry_display_profiles.json")
+VERSION = "0.0.16"
 NAME = 'Raspberry Pro'
 
 os.environ["QT_QUICK_BACKEND"] = "metal"
@@ -53,6 +56,85 @@ os.environ["QT_QUICK_BACKEND"] = "metal"
 fmt = QSurfaceFormat()
 fmt.setSamples(8)  # 打开 MSAA 多重采样抗锯齿
 QSurfaceFormat.setDefaultFormat(fmt)
+
+def load_display_name_map():
+    try:
+        if os.path.exists(DISPLAY_NAME_MAP_FILE):
+            with open(DISPLAY_NAME_MAP_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
+def save_display_name_map(data: dict):
+    try:
+        with open(DISPLAY_NAME_MAP_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def load_alias_name_map():
+    try:
+        if os.path.exists(ALIAS_NAME_MAP_FILE):
+            with open(ALIAS_NAME_MAP_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
+def save_alias_name_map(data: dict):
+    try:
+        with open(ALIAS_NAME_MAP_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def load_display_profile_cache():
+    """
+    Persisted auto-compact decisions keyed by screen name + resolution.
+    """
+    try:
+        if os.path.exists(DISPLAY_PROFILE_CACHE_FILE):
+            with open(DISPLAY_PROFILE_CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_display_profile_cache(data: dict):
+    try:
+        with open(DISPLAY_PROFILE_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def _normalize_display_name(name: str) -> str:
+    if not name:
+        return ""
+    if name.lower().endswith(".app"):
+        return name[:-4]
+    return name
+
+
+def get_finder_display_name(path: str) -> str:
+    """
+    Return Finder-visible display name for a given path.
+    """
+    if sys.platform == "darwin":
+        try:
+            name = NSFileManager.defaultManager().displayNameAtPath_(path)
+            if name:
+                return _normalize_display_name(str(name))
+        except Exception:
+            pass
+    return _normalize_display_name(os.path.basename(path))
 
 def is_dark_theme(app):
     defaults = NSUserDefaults.standardUserDefaults()
@@ -172,6 +254,24 @@ resource_tarname = "Resources/"
 BasePath = str(os.path.join(base_dir, resource_tarname))
 #BasePath = ''  # test
 #base_dir = ''  # test
+
+
+def clean_env_for_child():
+    """
+    Remove Qt-related env vars so child apps don't inherit our packaged Qt paths.
+    """
+    env = os.environ.copy()
+    for key in [
+        "QT_PLUGIN_PATH",
+        "QT_QPA_PLATFORM_PLUGIN_PATH",
+        "QT_QUICK_BACKEND",
+        "QT_WEBENGINE_DISABLE_SANDBOX",
+        "QT_SCALE_FACTOR",
+        "DYLD_LIBRARY_PATH",
+        "DYLD_FRAMEWORK_PATH",
+    ]:
+        env.pop(key, None)
+    return env
 
 # copy items from app to basepath
 old_base_path = Path('/Applications/Raspberry.app/Contents/Resources/')
@@ -456,8 +556,14 @@ def get_applications():  # 兼容加载检查iOS软件
         app_dirs = ["/Applications", "/System/Applications", "/System/Volumes/Preboot/Cryptexes/App/System/Applications"]
         app_paths = find_top_level_apps(app_dirs)
         save_app_paths(app_paths)
+    display_name_map = load_display_name_map()
+    alias_name_map = load_alias_name_map()
+    display_dirty = False
+    alias_dirty = False
     apps = []
+    seen_paths = set()
     for app_path in app_paths:
+        seen_paths.add(app_path)
         info_plist = os.path.join(app_path, 'Contents', 'Info.plist')
         itunes_plist = os.path.join(app_path, 'Wrapper', 'iTunesMetadata.plist')
         name = None
@@ -481,6 +587,16 @@ def get_applications():  # 兼容加载检查iOS软件
         # 3. 都没有就用文件夹名
         if not name:
             name = os.path.basename(app_path)[:-4]
+        display_name = get_finder_display_name(app_path)
+        if _normalize_display_name(display_name_map.get(app_path, "")) != display_name:
+            display_dirty = True
+            display_name_map[app_path] = display_name
+        alias_val = alias_name_map.get(app_path)
+        alias_val = _normalize_display_name(alias_val) if alias_val else None
+        if alias_val and alias_val != alias_name_map.get(app_path):
+            alias_name_map[app_path] = alias_val
+            alias_dirty = True
+        show_name = alias_val or display_name
         icon = load_icon_from_cache(app_path, name)
         if not icon:
             try:
@@ -490,7 +606,20 @@ def get_applications():  # 兼容加载检查iOS软件
             except Exception as e:
                 print(f"Failed to load icon for {app_path}: {e}")
                 icon = QIcon()
-        apps.append({'name': name, 'icon': icon, 'path': app_path})
+        apps.append({'name': show_name, 'display_name': display_name, 'icon': icon, 'path': app_path})
+    # 清理不存在的路径
+    for stale in list(display_name_map.keys()):
+        if stale not in seen_paths:
+            display_dirty = True
+            display_name_map.pop(stale, None)
+    for stale in list(alias_name_map.keys()):
+        if stale not in seen_paths:
+            alias_dirty = True
+            alias_name_map.pop(stale, None)
+    if display_dirty:
+        save_display_name_map(display_name_map)
+    if alias_dirty:
+        save_alias_name_map(alias_name_map)
     return apps
 
 
@@ -1577,7 +1706,7 @@ class RestartMessageBox(QWidget):
                     end try
                 end if
                 '''
-            subprocess.Popen(['osascript', '-e', applescript])
+            subprocess.Popen(['osascript', '-e', applescript], env=clean_env_for_child())
         self.result = idx
         self.accept()
 
@@ -1613,6 +1742,98 @@ class RestartMessageBox(QWidget):
         self.destroyed.connect(loop.quit)
         loop.exec()
         return self.result
+
+
+class CustomInputDialog(QDialog):
+    """
+    Frameless input dialog styled like CustomMessageBox.
+    Result: exec() returns button index; text property stores input.
+    """
+    def __init__(self, title, message, default_text="", parent=None, buttons=("OK", "Cancel"), default=0):
+        super().__init__(parent)
+        self.radius = 16
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setFixedSize(420, 240)
+        self.result = None
+        self.text = default_text
+        self.drag_pos = None
+
+        # 关闭按钮
+        self.close_button = MacWindowButton("#FF605C", "x", self)
+        self.close_button.move(10, 10)
+        self.close_button.clicked.connect(self.reject)
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(32, 40, 32, 24)
+        layout.setSpacing(12)
+
+        title_lbl = QLabel(title)
+        title_lbl.setStyleSheet("font-size: 16px; font-weight: 600;")
+        layout.addWidget(title_lbl)
+
+        msg_lbl = QLabel(message)
+        msg_lbl.setWordWrap(True)
+        msg_lbl.setStyleSheet("font-size: 14px;")
+        layout.addWidget(msg_lbl)
+
+        self.line_edit = QLineEdit(default_text)
+        self.line_edit.setMinimumHeight(32)
+        self.line_edit.setStyleSheet("""
+            QLineEdit {
+                border: 1px solid #CCCCCC;
+                border-radius: 8px;
+                padding: 6px 10px;
+                font-size: 14px;
+            }
+            QLineEdit:focus {
+                border: 1.5px solid #0085FF;
+            }
+        """)
+        layout.addWidget(self.line_edit)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        self.btns = []
+        for i, btn_text in enumerate(buttons):
+            btn = WhiteButton(btn_text)
+            btn.setFixedWidth(150)
+            btn.clicked.connect(lambda checked, idx=i: self._on_btn(idx))
+            btn_layout.addWidget(btn)
+            self.btns.append(btn)
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+
+        self.setLayout(layout)
+        self.btns[default].setFocus()
+
+    def _on_btn(self, idx):
+        self.result = idx
+        self.text = self.line_edit.text()
+        self.done(idx)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect())
+        path = QPainterPath()
+        path.addRoundedRect(rect, self.radius, self.radius)
+        painter.setClipPath(path)
+        if is_dark_theme(self):
+            painter.fillPath(path, QColor(30, 30, 30, 245))
+        else:
+            painter.fillPath(path, QColor(255, 255, 255, 245))
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.MouseButton.LeftButton and self.drag_pos is not None:
+            self.move(event.globalPosition().toPoint() - self.drag_pos)
+            event.accept()
 
 
 class GlassEffectWidget(QWidget):
@@ -1788,6 +2009,10 @@ class AppScanWorker(QThread):
         known_paths = set(load_app_paths())
         app_dirs = ["/Applications", "/System/Applications",
                     "/System/Volumes/Preboot/Cryptexes/App/System/Applications"]
+        display_name_map = load_display_name_map()
+        alias_name_map = load_alias_name_map()
+        display_dirty = False
+        alias_dirty = False
         found_paths = set()
         new_apps = []
         all_app_paths = find_top_level_apps(app_dirs)
@@ -1829,10 +2054,33 @@ class AppScanWorker(QThread):
                     except Exception as e:
                         print(f"Failed to load icon for {app_path}: {e}")
                         icon = QIcon()
-                new_apps.append({'name': name, 'icon': icon, 'path': app_path})
+                display_name = get_finder_display_name(app_path)
+                if _normalize_display_name(display_name_map.get(app_path, "")) != display_name:
+                    display_dirty = True
+                    display_name_map[app_path] = display_name
+                alias_val = alias_name_map.get(app_path)
+                alias_val = _normalize_display_name(alias_val) if alias_val else None
+                if alias_val and alias_val != alias_name_map.get(app_path):
+                    alias_name_map[app_path] = alias_val
+                    alias_dirty = True
+                show_name = alias_val or display_name
+                new_apps.append({'name': show_name, 'display_name': display_name, 'icon': icon, 'path': app_path})
         if new_apps:
             all_paths = list(known_paths | found_paths)
             save_app_paths(all_paths)
+        # 清理不存在的路径
+        for stale in list(display_name_map.keys()):
+            if stale not in found_paths and stale not in known_paths:
+                display_dirty = True
+                display_name_map.pop(stale, None)
+        for stale in list(alias_name_map.keys()):
+            if stale not in found_paths and stale not in known_paths:
+                alias_dirty = True
+                alias_name_map.pop(stale, None)
+        if display_dirty:
+            save_display_name_map(display_name_map)
+        if alias_dirty:
+            save_alias_name_map(alias_name_map)
         self.apps_found.emit({'new_apps': new_apps, 'all_paths': list(found_paths)})
 
     # def run(self):  # 这个是获取所有 .app 的写法
@@ -1987,7 +2235,7 @@ class AppButton(QPushButton):
                 if self._press_pos is not None and not self._dragging:
                     if (event.position() - self._press_pos).manhattanLength() <= QApplication.startDragDistance():
                         # 真正启动 app（与原先 mousePress 的逻辑相同）
-                        subprocess.Popen(['open', self.app_info['path']])
+                        subprocess.Popen(['open', self.app_info['path']], env=clean_env_for_child())
                         if self.main_window:
                             self.main_window.close_main_window()
                 event.accept()
@@ -2134,7 +2382,10 @@ class AppButton(QPushButton):
             self.main_window.move_app_out_of_group(self.app_info, self.parent_group)
 
     def move_to_trash(self):
-        subprocess.Popen(['osascript', '-e', f'tell app "Finder" to move POSIX file "{self.app_info["path"]}" to trash'])
+        subprocess.Popen(
+            ['osascript', '-e', f'tell app "Finder" to move POSIX file "{self.app_info["path"]}" to trash'],
+            env=clean_env_for_child()
+        )
         if self.main_window:
             self.main_window.remove_app(self.app_info)
 
@@ -2932,6 +3183,8 @@ class GroupWidget(QWidget):
         return super().eventFilter(obj, event)
 
     def handle_key_event(self, event):
+        if self.main_window and getattr(self.main_window, "new_keyboard_mode", True):
+            return self._handle_key_event_new_mode(event)
         if event.key() == Qt.Key.Key_Escape:
             self.close_group_widget()
             return True
@@ -2972,6 +3225,78 @@ class GroupWidget(QWidget):
                 self.focused_btn.show_context_menu(pos)
             else:
                 # 计算本地和全局坐标
+                local_pos = QPointF(self.focused_btn.rect().center())
+                global_pos = QPointF(self.focused_btn.mapToGlobal(self.focused_btn.rect().center()))
+                mouse_event = QMouseEvent(
+                    QEvent.Type.MouseButtonPress,
+                    local_pos,
+                    global_pos,
+                    Qt.MouseButton.LeftButton,
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier
+                )
+                QApplication.sendEvent(self.focused_btn, mouse_event)
+                mouse_event_release = QMouseEvent(
+                    QEvent.Type.MouseButtonRelease,
+                    local_pos,
+                    global_pos,
+                    Qt.MouseButton.LeftButton,
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier
+                )
+                QApplication.sendEvent(self.focused_btn, mouse_event_release)
+            return True
+        return False
+
+    def _handle_key_event_new_mode(self, event):
+        key = event.key()
+        modifiers = event.modifiers()
+        swap_mod = modifiers & (Qt.KeyboardModifier.ControlModifier |
+                                Qt.KeyboardModifier.AltModifier |
+                                Qt.KeyboardModifier.MetaModifier)
+        shift_mod = modifiers & Qt.KeyboardModifier.ShiftModifier
+
+        if key == Qt.Key.Key_Escape:
+            self.close_group_widget()
+            return True
+        if swap_mod and key == Qt.Key.Key_Left:
+            self.move_focused_btn_left()
+            return True
+        if swap_mod and key == Qt.Key.Key_Right:
+            self.move_focused_btn_right()
+            return True
+        if shift_mod and key == Qt.Key.Key_Left:
+            self.goto_page(max(self.current_page - 1, 0))
+            return True
+        if shift_mod and key == Qt.Key.Key_Right:
+            total_pages = max(1, (len(self.group['apps']) + self.items_per_page - 1) // self.items_per_page)
+            self.goto_page(min(self.current_page + 1, total_pages - 1))
+            return True
+        if key == Qt.Key.Key_Left:
+            self.focus_prev_btn()
+            return True
+        if key == Qt.Key.Key_Right:
+            self.focus_next_btn()
+            return True
+        if key == Qt.Key.Key_Up:
+            self.focus_up_btn()
+            return True
+        if key == Qt.Key.Key_Down:
+            self.focus_down_btn()
+            return True
+        if key == Qt.Key.Key_Space:
+            if shift_mod:
+                self.focus_prev_btn()
+            else:
+                self.focus_next_btn()
+            return True
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if self.focused_btn is None:
+                return False
+            if shift_mod:
+                pos = self.focused_btn.rect().center()
+                self.focused_btn.show_context_menu(pos)
+            else:
                 local_pos = QPointF(self.focused_btn.rect().center())
                 global_pos = QPointF(self.focused_btn.mapToGlobal(self.focused_btn.rect().center()))
                 mouse_event = QMouseEvent(
@@ -3528,6 +3853,8 @@ class LaunchpadWindow(QWidget):
         self._mouse_move_pos = None
 
         self.apps = apps
+        self.display_name_map = load_display_name_map()
+        self.alias_name_map = load_alias_name_map()
         self.groups = load_groups(self.apps)
         self.current_page = 0
         self.items_per_page = 35
@@ -3557,6 +3884,7 @@ class LaunchpadWindow(QWidget):
         ordered_apps = [app_dict[p] for p in order if p in app_dict]
         unordered_apps = [a for p, a in app_dict.items() if p not in order]
         self.filtered_apps = ordered_apps + unordered_apps
+        self.apply_display_aliases(refresh=False)
 
         self.group_widget = None
 
@@ -3603,6 +3931,38 @@ class LaunchpadWindow(QWidget):
         self.traditional_mode_action.setChecked(self.traditional_mode)
         self.traditional_mode_action.triggered.connect(self.toggle_traditional_mode)
         self.menu.addAction(self.traditional_mode_action)
+
+        # 键盘映射模式（默认启用新的映射）
+        self.new_keyboard_mode = self.read_keyboard_mode_setting()
+        self.new_keyboard_mode_action = QAction(self.tr("⌨️ New keyboard navigation"), self)
+        self.new_keyboard_mode_action.setCheckable(True)
+        self.new_keyboard_mode_action.setChecked(self.new_keyboard_mode)
+        self.new_keyboard_mode_action.triggered.connect(self.toggle_keyboard_mode)
+        self.menu.addAction(self.new_keyboard_mode_action)
+
+        # 关闭时自动清理搜索
+        self.clear_search_on_close = self.read_clear_search_on_close_setting()
+        self.clear_search_on_close_action = QAction(self.tr("🧽 Clear search when closing"), self)
+        self.clear_search_on_close_action.setCheckable(True)
+        self.clear_search_on_close_action.setChecked(self.clear_search_on_close)
+        self.clear_search_on_close_action.triggered.connect(self.toggle_clear_search_on_close)
+        self.menu.addAction(self.clear_search_on_close_action)
+
+        self.menu.addSeparator()
+
+        # 一键按字母排序未分组 App
+        self.sort_alpha_action = QAction(self.tr("🔤 Sort ungrouped apps alphabetically"), self)
+        self.sort_alpha_action.triggered.connect(self.sort_ungrouped_apps_alphabetically)
+        self.menu.addAction(self.sort_alpha_action)
+
+        # 自定义别名
+        self.set_alias_action = QAction(self.tr("📝 Set custom alias (based on Finder name)"), self)
+        self.set_alias_action.triggered.connect(self.prompt_set_alias)
+        self.menu.addAction(self.set_alias_action)
+
+        self.reset_alias_action = QAction(self.tr("♻️ Reset all aliases to Finder names"), self)
+        self.reset_alias_action.triggered.connect(self.reset_aliases_to_finder)
+        self.menu.addAction(self.reset_alias_action)
 
         self.menu.addSeparator()
 
@@ -3780,6 +4140,7 @@ class LaunchpadWindow(QWidget):
         self._is_animating = False
 
         self._last_screen_width = None
+        self._last_screen_key = None
 
         self.setFocus()
 
@@ -4287,6 +4648,7 @@ class LaunchpadWindow(QWidget):
         if new_apps:
             self.apps.extend(new_apps)
             self.apps = self.dedup_apps(self.apps)
+            self.apply_display_aliases(refresh=False)
             # 新增：自动加到 main_order 顺序末尾
             for a in new_apps:
                 # 只加未分组的 app
@@ -4463,6 +4825,8 @@ class LaunchpadWindow(QWidget):
         return super().eventFilter(obj, event)
 
     def handle_key_event(self, event):
+        if getattr(self, "new_keyboard_mode", True):
+            return self._handle_key_event_new_mode(event)
         if event.key() == Qt.Key.Key_Escape:
             self.close_main_window()
             return True
@@ -4498,6 +4862,77 @@ class LaunchpadWindow(QWidget):
                 self.focused_btn.show_context_menu(pos)
             else:
                 # 计算本地和全局坐标
+                local_pos = QPointF(self.focused_btn.rect().center())
+                global_pos = QPointF(self.focused_btn.mapToGlobal(self.focused_btn.rect().center()))
+                mouse_event = QMouseEvent(
+                    QEvent.Type.MouseButtonPress,
+                    local_pos,
+                    global_pos,
+                    Qt.MouseButton.LeftButton,
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier
+                )
+                QApplication.sendEvent(self.focused_btn, mouse_event)
+                mouse_event_release = QMouseEvent(
+                    QEvent.Type.MouseButtonRelease,
+                    local_pos,
+                    global_pos,
+                    Qt.MouseButton.LeftButton,
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier
+                )
+                QApplication.sendEvent(self.focused_btn, mouse_event_release)
+            return True
+        return False
+
+    def _handle_key_event_new_mode(self, event):
+        key = event.key()
+        modifiers = event.modifiers()
+        swap_mod = modifiers & (Qt.KeyboardModifier.ControlModifier |
+                                Qt.KeyboardModifier.AltModifier |
+                                Qt.KeyboardModifier.MetaModifier)
+        shift_mod = modifiers & Qt.KeyboardModifier.ShiftModifier
+
+        if key == Qt.Key.Key_Escape:
+            self.close_main_window()
+            return True
+        if swap_mod and key == Qt.Key.Key_Left:
+            self.move_focused_btn_left()
+            return True
+        if swap_mod and key == Qt.Key.Key_Right:
+            self.move_focused_btn_right()
+            return True
+        if shift_mod and key == Qt.Key.Key_Left:
+            self.goto_page(max(self.current_page - 1, 0))
+            return True
+        if shift_mod and key == Qt.Key.Key_Right:
+            self.goto_page(min(self.current_page + 1, self.total_pages() - 1))
+            return True
+        if key == Qt.Key.Key_Left:
+            self.focus_prev_btn()
+            return True
+        if key == Qt.Key.Key_Right:
+            self.focus_next_btn()
+            return True
+        if key == Qt.Key.Key_Up:
+            self.focus_up_btn()
+            return True
+        if key == Qt.Key.Key_Down:
+            self.focus_down_btn()
+            return True
+        if key == Qt.Key.Key_Space:
+            if shift_mod:
+                self.focus_prev_btn()
+            else:
+                self.focus_next_btn()
+            return True
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if self.focused_btn is None:
+                return False
+            if shift_mod:
+                pos = self.focused_btn.rect().center()
+                self.focused_btn.show_context_menu(pos)
+            else:
                 local_pos = QPointF(self.focused_btn.rect().center())
                 global_pos = QPointF(self.focused_btn.mapToGlobal(self.focused_btn.rect().center()))
                 mouse_event = QMouseEvent(
@@ -4604,8 +5039,9 @@ class LaunchpadWindow(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        self.adapt_to_screen()  # 每次 show 都刷新几何
-        self.display_apps(self.filtered_apps, self.current_page)
+        rendered = self.adapt_to_screen()  # 每次 show 都刷新几何
+        if not rendered:
+            self.display_apps(self.filtered_apps, self.current_page)
         self.prepare_icons_for_animation()
         if getattr(self, '_force_show_dock', False):
             self.show_dock()
@@ -4615,6 +5051,9 @@ class LaunchpadWindow(QWidget):
         QTimer.singleShot(2000, self.start_background_scan)  # 新增：主UI展示后2秒再扫描一次
 
     def close_main_window(self):
+        if getattr(self, "clear_search_on_close", False) and self.main_content.search_bar.text().strip():
+            # 清除搜索并恢复默认布局，避免下次打开仍停留在搜索结果
+            self.main_content.search_bar.setText('')
         if not self.isVisible():
             return
         # 防止重复动画
@@ -4748,7 +5187,7 @@ class LaunchpadWindow(QWidget):
             toggle_dock_script = '''
                 tell application "System Events" to set the autohide of dock preferences to true
             '''
-            subprocess.run(["osascript", "-e", toggle_dock_script])
+            subprocess.run(["osascript", "-e", toggle_dock_script], env=clean_env_for_child())
         except Exception as e:
             pass
 
@@ -4759,7 +5198,7 @@ class LaunchpadWindow(QWidget):
             toggle_dock_script = '''
                 tell application "System Events" to set the autohide of dock preferences to false
             '''
-            subprocess.run(["osascript", "-e", toggle_dock_script])
+            subprocess.run(["osascript", "-e", toggle_dock_script], env=clean_env_for_child())
         except Exception as e:
             pass
 
@@ -5171,18 +5610,23 @@ class LaunchpadWindow(QWidget):
     			end tell
     		on error number -128
     			quit application "Raspberry"
-    			delay 1
-    			activate application "Raspberry"
-    		end try
-    	end if
+    		delay 1
+    		activate application "Raspberry"
+    	end try
+   	end if
     	'''
-        subprocess.Popen(['osascript', '-e', applescript])
+        subprocess.Popen(['osascript', '-e', applescript], env=clean_env_for_child())
 
     def find_matching_paths(self, item_name, all_paths):
         matches = []
-        item_lower = item_name.lower()
+        item_lower = _normalize_display_name(item_name).lower()
+        display_map = getattr(self, "display_name_map", load_display_name_map())
         for path in all_paths:
             basename = os.path.basename(path)
+            display_name = _normalize_display_name(display_map.get(path) or get_finder_display_name(path))
+            if display_name.lower() == item_lower:
+                matches.append(path)
+                continue
             if basename.endswith('.app'):
                 app_main_name = basename[:-4].lower()
                 if app_main_name == item_lower:
@@ -5264,6 +5708,8 @@ class LaunchpadWindow(QWidget):
             msg = CustomMessageBox(self.tr(f"lporg not found at %n").replace('%n', lporg_path), parent=self, buttons=(self.tr("OK"),))
             msg.exec()
             return
+        # 确保 display/alias 映射最新
+        self.apply_display_aliases(refresh=False)
         base_dir_str = str(Path.home()) + "/Library/Application\\\ Support/com.ryanthehito.raspberry/Resources/lporg"
         lporg_cmd = base_dir_str + ' save'
         applescript = f'do shell script "{lporg_cmd}"'
@@ -5271,7 +5717,7 @@ class LaunchpadWindow(QWidget):
         try:
             result = subprocess.run(
                 ["osascript", "-e", applescript],
-                capture_output=True, text=True
+                capture_output=True, text=True, env=clean_env_for_child()
             )
             output = result.stdout.strip()
             if result.returncode == 0:
@@ -5467,16 +5913,21 @@ class LaunchpadWindow(QWidget):
                     ".launchpad_app_order.json",
                     ".launchpad_app_paths.json",
                     ".launchpad_main_order.json",
+                    ".raspberry_display_names.json",
+                    ".raspberry_alias_names.json",
                 ]
                 icon_cache_src = backup_dir / ".launchpad_icon_cache"
-                missing = [f for f in files if not (backup_dir / f).exists()]
-                if missing:
-                    msg = CustomMessageBox(self.tr(f"Missing files: %n").replace('%n', ', '.join(missing)), parent=self, buttons=(self.tr("OK"),))
+                required = files[:4]  # 前四个是必需
+                missing_required = [f for f in required if not (backup_dir / f).exists()]
+                if missing_required:
+                    msg = CustomMessageBox(self.tr(f"Missing files: %n").replace('%n', ', '.join(missing_required)), parent=self, buttons=(self.tr("OK"),))
                     msg.exec()
                     return
                 # 覆盖文件
                 for f in files:
-                    shutil.copy2(backup_dir / f, Path.home() / f"{f}")
+                    src = backup_dir / f
+                    if src.exists():
+                        shutil.copy2(src, Path.home() / f"{f}")
                 # 覆盖 icon cache
                 icon_cache_dst = Path(ICON_CACHE_DIR)
                 if icon_cache_src.exists():
@@ -5484,33 +5935,78 @@ class LaunchpadWindow(QWidget):
                     if icon_cache_dst.exists():
                         shutil.rmtree(icon_cache_dst)
                     shutil.copytree(icon_cache_src, icon_cache_dst, dirs_exist_ok=True)
+                # 重新加载内存状态，避免立刻写回覆盖
+                self.apps = get_applications()
+                self.groups = load_groups(self.apps)
+                self.app_dict = {a['path']: a for a in self.apps}
+                self.group_dict = {g['name']: g for g in self.groups}
+                saved_main = load_main_order()
+                self.main_order = []
+                for oid in saved_main:
+                    if oid in self.group_dict:
+                        self.main_order.append(('group', self.group_dict[oid]))
+                    elif oid in self.app_dict:
+                        self.main_order.append(('app', self.app_dict[oid]))
+                for g in self.groups:
+                    if ('group', g) not in self.main_order:
+                        self.main_order.append(('group', g))
+                for a in self.apps:
+                    if ('app', a) not in self.main_order and not any(a in g['apps'] for g in self.groups):
+                        self.main_order.append(('app', a))
+                order = load_app_order()
+                app_dict = {a['path']: a for a in self.apps if not any(a in g['apps'] for g in self.groups)}
+                ordered_apps = [app_dict[p] for p in order if p in app_dict]
+                unordered_apps = [a for p, a in app_dict.items() if p not in order]
+                self.filtered_apps = ordered_apps + unordered_apps
+                self.apply_display_aliases(refresh=False)
+                self.current_page = 0
+                self.display_apps(self.filtered_apps, self.current_page)
                 dlg = RestartMessageBox(self.tr("Executed successfully.\nRaspberry will restart."), parent=self,
                                         buttons=(self.tr("OK"), self.tr("Later")))
-                dlg.exec()
-                # 重新加载
-                # print('idontthinkthiswork')
-                # self.apps = get_applications()
-                # self.groups = load_groups(self.apps)
-                # self.filtered_apps = [a for a in self.apps if not any(a in g['apps'] for g in self.groups)]
-                # self.current_page = 0
-                # self.display_apps(self.filtered_apps, self.current_page)
+                if dlg.exec() == 0:
+                    self.restart_app()
 
     def adapt_to_screen(self):
         screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
         geo: QRect = screen.geometry()
         screen_width = geo.width()
-        if geo != self.geometry():
+        screen_height = geo.height()
+        screen_key = f"{screen.name() or 'Unknown'}|{screen_width}x{screen_height}"
+
+        geometry_changed = geo != self.geometry()
+        key_changed = (self._last_screen_key != screen_key)
+
+        # 命中缓存时：仅同步几何（如有需要），并通过 check_and_apply_compact_mode 用缓存直接刷新一次
+        cache = load_display_profile_cache()
+        if screen_key in cache:
+            if geometry_changed:
+                self.setGeometry(geo)
+                self.main_content.setGeometry(self.rect())
+                if self.group_widget and self.group_widget.isVisible():
+                    gw = self.group_widget
+                    gw.move((self.width() - gw.width()) // 2,
+                            (self.height() - gw.height()) // 2)
+            self._last_screen_width = screen_width
+            self._last_screen_key = screen_key
+            rendered = self.check_and_apply_compact_mode()  # 利用缓存直接应用/刷新
+            return bool(rendered)
+
+        if geometry_changed:
             self.setGeometry(geo)
             self.main_content.setGeometry(self.rect())
             if self.group_widget and self.group_widget.isVisible():
                 gw = self.group_widget
                 gw.move((self.width() - gw.width()) // 2,
                         (self.height() - gw.height()) // 2)
-            # 只有屏幕宽度变化时才自动判断
-            if self._last_screen_width != screen_width:
-                self._last_screen_width = screen_width
-                self.check_and_apply_compact_mode()
+        # 屏幕信息发生变化（包含分辨率或屏幕名称）时才重新计算/应用
+        already_rendered = False
+        if key_changed or self._last_screen_width != screen_width or geometry_changed:
+            self._last_screen_width = screen_width
+            self._last_screen_key = screen_key
+            already_rendered = self.check_and_apply_compact_mode()
+        if geometry_changed and not already_rendered:
             self.display_apps(self.filtered_apps, self.current_page)
+        return bool(already_rendered)
 
     def change_language(self, code):
         # 1) 记录到配置
@@ -5653,10 +6149,149 @@ class LaunchpadWindow(QWidget):
             w.setParent(None)
             w.deleteLater()
 
+    def apply_display_aliases(self, refresh: bool = True):
+        """
+        Refresh app names using Finder display name + custom aliases.
+        """
+        self.display_name_map = load_display_name_map()
+        self.alias_name_map = load_alias_name_map()
+        display_dirty = False
+        alias_dirty = False
+        seen = set()
+        for app in self.apps:
+            path = app['path']
+            seen.add(path)
+            display_name = _normalize_display_name(self.display_name_map.get(path) or get_finder_display_name(path))
+            if _normalize_display_name(self.display_name_map.get(path, "")) != display_name:
+                display_dirty = True
+                self.display_name_map[path] = display_name
+            alias_raw = self.alias_name_map.get(path)
+            alias = _normalize_display_name(alias_raw) if alias_raw else display_name
+            if alias_raw and alias != alias_raw:
+                alias_dirty = True
+                self.alias_name_map[path] = alias
+            app['display_name'] = display_name
+            app['name'] = alias
+        for stale in list(self.display_name_map.keys()):
+            if stale not in seen:
+                display_dirty = True
+                self.display_name_map.pop(stale, None)
+        for stale in list(self.alias_name_map.keys()):
+            if stale not in seen:
+                alias_dirty = True
+                self.alias_name_map.pop(stale, None)
+        if display_dirty:
+            save_display_name_map(self.display_name_map)
+        if alias_dirty:
+            save_alias_name_map(self.alias_name_map)
+        if refresh:
+            self.filtered_apps = [a for a in self.apps if not any(a in g['apps'] for g in self.groups)]
+            self.display_apps(self.filtered_apps, self.current_page)
+            self.save_current_order()
+
+    def sort_ungrouped_apps_alphabetically(self):
+        """
+        Sort ungrouped apps alphabetically (one-time action).
+        """
+        ungrouped_apps = [a for a in self.apps if not any(a in g['apps'] for g in self.groups)]
+        if not ungrouped_apps:
+            return
+        sorted_apps = sorted(ungrouped_apps, key=lambda a: a.get('name', '').lower())
+        # 保留当前 group 顺序，仅替换 app 段
+        groups_in_order = [obj for typ, obj in self.main_order if typ == 'group']
+        self.main_order = [('group', g) for g in groups_in_order] + [('app', a) for a in sorted_apps]
+        self.filtered_apps = sorted_apps
+        self.current_page = 0
+        save_app_order([a['path'] for a in sorted_apps])
+        self.save_current_order()
+        self.display_apps(self.filtered_apps, self.current_page)
+
+    def prompt_set_alias(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            self.tr("Select application"),
+            "/Applications",
+            "Applications (*.app)"
+        )
+        if not path:
+            return
+        display_name = get_finder_display_name(path)
+        current_alias_raw = self.alias_name_map.get(path, display_name)
+        current_alias = _normalize_display_name(current_alias_raw)
+        dlg = CustomInputDialog(
+            self.tr("Set alias"),
+            self.tr("Alias for %n").replace('%n', display_name),
+            default_text=current_alias,
+            parent=self,
+            buttons=(self.tr("OK"), self.tr("Cancel")),
+            default=0
+        )
+        res = dlg.exec()
+        if res != 0:  # cancel or close
+            return
+        alias = dlg.text.strip()
+        if alias:
+            self.alias_name_map[path] = alias
+        else:
+            self.alias_name_map.pop(path, None)
+        # 同步 display name
+        self.display_name_map[path] = display_name
+        save_display_name_map(self.display_name_map)
+        save_alias_name_map(self.alias_name_map)
+        self.apply_display_aliases(refresh=True)
+
+    def reset_aliases_to_finder(self):
+        self.alias_name_map = {}
+        save_alias_name_map(self.alias_name_map)
+        self.apply_display_aliases(refresh=True)
+
+    def toggle_keyboard_mode(self):
+        self.new_keyboard_mode = self.new_keyboard_mode_action.isChecked()
+        self.write_keyboard_mode_setting(self.new_keyboard_mode)
+
+    def read_keyboard_mode_setting(self):
+        path = os.path.expanduser("~/.raspberry_keyboard_mode")
+        try:
+            if os.path.exists(path):
+                return open(path, "r", encoding="utf-8").read().strip() != "0"
+        except Exception:
+            pass
+        # 默认启用新键盘映射
+        return True
+
+    def write_keyboard_mode_setting(self, enabled: bool):
+        path = os.path.expanduser("~/.raspberry_keyboard_mode")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("1" if enabled else "0")
+        except Exception:
+            pass
+
+    def toggle_clear_search_on_close(self):
+        self.clear_search_on_close = self.clear_search_on_close_action.isChecked()
+        self.write_clear_search_on_close_setting(self.clear_search_on_close)
+
+    def read_clear_search_on_close_setting(self):
+        path = os.path.expanduser("~/.raspberry_clear_search_on_close")
+        try:
+            if os.path.exists(path):
+                return open(path, "r", encoding="utf-8").read().strip() == "1"
+        except Exception:
+            pass
+        # 默认关闭
+        return False
+
+    def write_clear_search_on_close_setting(self, enabled: bool):
+        path = os.path.expanduser("~/.raspberry_clear_search_on_close")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("1" if enabled else "0")
+        except Exception:
+            pass
+
     def toggle_compact_mode(self):
         self.compact_mode = self.compact_mode_action.isChecked()
         self.write_compact_mode_setting(self.compact_mode)
-        self.check_and_apply_compact_mode()  # 新增：自动判断
         self.display_apps(self.filtered_apps, self.current_page)
 
     # 仅保存 bool，别保存边距
@@ -5932,12 +6567,34 @@ class LaunchpadWindow(QWidget):
         enabled = self.auto_compact_mode_action.isChecked()
         self.write_auto_compact_mode_setting(enabled)
         # 立即判断一次
-        self.check_and_apply_compact_mode()
-        self.display_apps(self.filtered_apps, self.current_page)
+        rendered = self.check_and_apply_compact_mode()
+        if not rendered:
+            self.display_apps(self.filtered_apps, self.current_page)
 
     def check_and_apply_compact_mode(self):
         if not self.read_auto_compact_mode_setting():
-            return
+            return False
+
+        screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        cache = load_display_profile_cache()
+        cache_key = None
+        screen_name = "Unknown"
+        screen_width = screen_height = 0
+
+        if screen:
+            geo = screen.geometry()
+            screen_name = screen.name() or "Unknown"
+            screen_width = geo.width()
+            screen_height = geo.height()
+            cache_key = f"{screen_name}|{screen_width}x{screen_height}"
+            cached_profile = cache.get(cache_key)
+            # 如果有缓存，直接应用，不再计算
+            if cached_profile and "compact_mode" in cached_profile:
+                self.compact_mode = bool(cached_profile.get("compact_mode", False))
+                self.compact_mode_action.setChecked(self.compact_mode)
+                self.write_compact_mode_setting(self.compact_mode)
+                self.display_apps(self.filtered_apps, self.current_page)
+                return True
 
         # 先用正常模式布局
         self.compact_mode = False
@@ -5968,6 +6625,17 @@ class LaunchpadWindow(QWidget):
             self.compact_mode_action.setChecked(True)
             self.write_compact_mode_setting(True)
             self.display_apps(self.filtered_apps, self.current_page)
+
+        if cache_key:
+            cache[cache_key] = {
+                "screen_name": screen_name,
+                "width": screen_width,
+                "height": screen_height,
+                "compact_mode": self.compact_mode,
+                "updated_at": datetime.datetime.now().isoformat()
+            }
+            save_display_profile_cache(cache)
+        return True
 
     def get_actual_icon_gap(self):
         grid_layout = self.main_content.grid_layout

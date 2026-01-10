@@ -6,6 +6,10 @@
 
 <p align="center"><a href="https://t.me/+AODLypeF_aYwYjNh">Telegram</a> | <a href="https://twitter.com/ryanswindows">Twitter</a> | <a href="https://weibo.com/ryanthehitos">Weibo</a></p>
 
+<p align="center"><a href="https://github.com/Ryan-the-hito/Raspberry/releases/latest/download/Raspberry.dmg">Download the latest FREE version</a>  | <a href="https://github.com/Ryan-the-hito/Raspberry/releases/latest/download/Raspberry.dmg">下载最新免费版</a></p>
+
+<p align="center"><a href="https://buymeacoffee.com/ryanthehito/e/451635">Buy the latest PRO version</a>  | <a href="https://buymeacoffee.com/ryanthehito/e/451635">购买最新 PRO 版</a></p>
+
 Raspberry 是一个 macOS 启动台的替代品，能帮助您在 macOS Tahoe 上组织管理软件和分组。
 
 ## 解决问题

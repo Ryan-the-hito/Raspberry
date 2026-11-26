@@ -4,6 +4,14 @@
 # coding=utf-8
 # coding:utf-8
 
+import sys
+# Started by another AI app as its MCP server (shared/APP_MCP_SPEC.md): no window, only the bridge that
+# forwards to the tools of the family's apps on this Mac. Before anything else (also before the
+# single-instance check), so stdout stays clean.
+if '--mcp-stdio' in sys.argv[1:]:
+    import app_mcp_host
+    sys.exit(app_mcp_host.main())
+
 import os
 import math
 import datetime
@@ -17,39 +25,154 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QGridLayout, QPushButton, QLineEdit, QMenu, QLabel, QHBoxLayout, QSizePolicy, QMenuBar, QMessageBox, QFileDialog, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QDialog, QTextEdit, QToolButton, QProgressBar, QSlider, QWidgetAction, QInputDialog
 )
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QFont, QPalette, QColor, QGuiApplication, QPainterPath, QRegion, QMouseEvent, QTextOption, QFontMetrics, QLinearGradient, QPen, QBrush, QAction, QSurfaceFormat, QCursor, QDrag
-from PyQt6.QtCore import Qt, QPropertyAnimation, QRect, pyqtSignal, QSize, QPoint, QRectF, QTimer, QThread, QEasingCurve, QParallelAnimationGroup, QAbstractAnimation, QEvent, QPointF, QCoreApplication, QElapsedTimer, QEventLoop, QTranslator, QLocale, QLibraryInfo, pyqtSlot, QMargins, QMimeData
-from qframelesswindow import AcrylicWindow, FramelessWindow, TitleBar, StandardTitleBar
+from PyQt6.QtCore import Qt, QObject, QPropertyAnimation, QVariantAnimation, QRect, pyqtSignal, QSize, QPoint, QRectF, QTimer, QThread, QEasingCurve, QParallelAnimationGroup, QAbstractAnimation, QEvent, QPointF, QCoreApplication, QElapsedTimer, QEventLoop, QTranslator, QLocale, QLibraryInfo, pyqtSlot, QMargins, QMimeData
 import hashlib
 import sys
+import threading
+import atexit
+import weakref
 from PIL import Image, ImageFilter, ImageQt
 from pathlib import Path
 import shutil
 import webbrowser
-import urllib3
 import logging
-import requests
 import re
 from PyQt6 import sip
-from bs4 import BeautifulSoup
-import html2text
+# requests / bs4 / html2text: loaded by the update check when it runs (about 0.35 s less at every start)
 if sys.platform == "darwin":
     import objc
-    from Foundation import NSObject, NSNotificationCenter, NSSelectorFromString, NSDistributedNotificationCenter, NSUserDefaults, NSFileManager
+    from Foundation import NSBundle, NSObject, NSNotificationCenter, NSSelectorFromString, NSDistributedNotificationCenter, NSUserDefaults, NSFileManager, NSAppleEventManager
     from AppKit import NSWorkspace, NSImage, NSApp
     from PyQt6.QtGui import QImage
 
 
-GROUPS_FILE = os.path.expanduser("~/.launchpad_groups.json")
-ICON_CACHE_DIR = os.path.expanduser("~/.launchpad_icon_cache")
+# ── where Raspberry keeps its things (Ryan 2026-11-16: like Broccoli, the places Apple recommends) ──
+#   data      ~/Library/Application Support/com.ryanthehito.raspberry/RaspberryAppPath/
+#   settings  …/RaspberryAppPath/Settings/           (one small file per switch)
+#   backups   …/RaspberryAppPath/Backups/
+#   cache     ~/Library/Caches/com.ryanthehito.raspberry/   (the icon pictures: can be made again)
+# Until 0.0.16 all of it lay loose in the home folder as hidden files (~/.launchpad_… / ~/.raspberry_…).
+# The first start of this version moves them (move_legacy_data below): a copy goes to Backups first,
+# then each file is moved and is gone from the home folder. Nothing reads the old places afterwards.
+BUNDLE_ID = 'com.ryanthehito.raspberry'
+APP_SUPPORT_DIR = os.path.join(os.path.expanduser("~/Library/Application Support"), BUNDLE_ID)
+DATA_DIR = os.path.join(APP_SUPPORT_DIR, 'RaspberryAppPath')
+SETTINGS_DIR = os.path.join(DATA_DIR, 'Settings')
+BACKUPS_DIR = os.path.join(DATA_DIR, 'Backups')
+CACHE_DIR = os.path.join(os.path.expanduser("~/Library/Caches"), BUNDLE_ID)
+MOVE_NOTICE_FILE = os.path.join(DATA_DIR, '.moved_notice_pending')
+
+
+def data_path(name) -> str:
+    return os.path.join(DATA_DIR, name)
+
+
+def setting_path(name) -> str:
+    return os.path.join(SETTINGS_DIR, name)
+
+
+# (name in the home folder until 0.0.16, where it is now); also how a backup folder's files are named
+LEGACY_DATA_FILES = [
+    ('.launchpad_groups.json', data_path('groups.json')),
+    ('.launchpad_app_order.json', data_path('app_order.json')),
+    ('.launchpad_app_paths.json', data_path('app_paths.json')),
+    ('.launchpad_main_order.json', data_path('main_order.json')),
+    ('.raspberry_display_names.json', data_path('display_names.json')),
+    ('.raspberry_alias_names.json', data_path('alias_names.json')),
+    ('.raspberry_display_profiles.json', data_path('display_profiles.json')),
+    ('.raspberry_user_apps_places.json', data_path('user_apps_places.json')),
+]
+LEGACY_SETTING_FILES = [('.raspberry_' + name, setting_path(name)) for name in (
+    'hide_dock', 'show_dock', 'clean_wallpaper', 'keyboard_mode', 'clear_search_on_close', 'compact_mode',
+    'anim_speed', 'auto_compact_mode', 'user_apps', 'lang')]
+LEGACY_ICON_CACHE = '.launchpad_icon_cache'
+
+
+def merge_auto_compact_setting():
+    """Once: "Auto Compact Mode" is gone (Ryan 2026-11-19: one switch). Whoever had it on wanted the
+    narrower spacing wherever there is one — that is what Compact Mode itself does now — so Compact
+    Mode is switched on for them; the old switch's file and its per-screen record are removed."""
+    auto, record = setting_path('auto_compact_mode'), data_path('display_profiles.json')
+    try:
+        if os.path.isfile(auto):
+            with open(auto, encoding='utf-8') as handle:
+                was_on = handle.read().strip() == '1'
+            if was_on:
+                with open(setting_path('compact_mode'), 'w', encoding='utf-8') as handle:
+                    handle.write('1')
+            os.remove(auto)
+        if os.path.isfile(record):
+            os.remove(record)
+    except Exception:
+        pass
+
+
+def move_legacy_data(home=None):
+    """Once, on the first start of this version: everything Raspberry kept loose in the home folder
+    goes to its new place. Returns the old names that were moved (empty: nothing was there).
+    A copy of the files is kept in Backups/before_move_<time> first. A file that already exists at
+    the new place wins: the old one only goes into that backup. The icon cache is moved, not copied
+    (it can be made again); if moving it fails it is simply dropped."""
+    home = home or os.path.expanduser("~")
+    for folder in (DATA_DIR, SETTINGS_DIR, BACKUPS_DIR, CACHE_DIR):
+        os.makedirs(folder, exist_ok=True)
+    found = [(old, new) for old, new in LEGACY_DATA_FILES + LEGACY_SETTING_FILES
+             if os.path.isfile(os.path.join(home, old))]
+    old_cache = os.path.join(home, LEGACY_ICON_CACHE)
+    moved = []
+    if found:
+        backup = os.path.join(BACKUPS_DIR, 'before_move_' + datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
+        os.makedirs(backup, exist_ok=True)
+        for old, new in found:
+            source = os.path.join(home, old)
+            try:
+                shutil.copy2(source, os.path.join(backup, old))
+                if not os.path.exists(new):
+                    os.makedirs(os.path.dirname(new), exist_ok=True)
+                    shutil.move(source, new)
+                else:
+                    os.remove(source)
+                moved.append(old)
+            except Exception as error:
+                print(f"Could not move {source}: {error}")
+    if os.path.isdir(old_cache):
+        target = os.path.join(CACHE_DIR, 'icon_cache')
+        try:
+            if os.path.isdir(target) and os.listdir(target):
+                shutil.rmtree(old_cache)
+            else:
+                if os.path.isdir(target):
+                    os.rmdir(target)
+                shutil.move(old_cache, target)
+            moved.append(LEGACY_ICON_CACHE)
+        except Exception as error:
+            print(f"Could not move {old_cache}: {error}")
+            shutil.rmtree(old_cache, ignore_errors=True)
+    if moved:
+        try:
+            with open(MOVE_NOTICE_FILE, 'w', encoding='utf-8') as f:
+                f.write(datetime.datetime.now().isoformat())
+        except Exception:
+            pass
+    return moved
+
+
+DATA_MOVED = move_legacy_data()
+merge_auto_compact_setting()
+
+GROUPS_FILE = data_path('groups.json')
+ICON_CACHE_DIR = os.path.join(CACHE_DIR, 'icon_cache')
 os.makedirs(ICON_CACHE_DIR, exist_ok=True)
-APP_PATHS_FILE = os.path.expanduser("~/.launchpad_app_paths.json")
-APP_ORDER_FILE = os.path.expanduser("~/.launchpad_app_order.json")
-MAIN_ORDER_FILE = os.path.expanduser("~/.launchpad_main_order.json")
-DISPLAY_NAME_MAP_FILE = os.path.expanduser("~/.raspberry_display_names.json")
-ALIAS_NAME_MAP_FILE = os.path.expanduser("~/.raspberry_alias_names.json")
-DISPLAY_PROFILE_CACHE_FILE = os.path.expanduser("~/.raspberry_display_profiles.json")
-VERSION = "0.0.16"
-NAME = 'Raspberry Pro'
+APP_PATHS_FILE = data_path('app_paths.json')
+APP_ORDER_FILE = data_path('app_order.json')
+MAIN_ORDER_FILE = data_path('main_order.json')
+DISPLAY_NAME_MAP_FILE = data_path('display_names.json')
+ALIAS_NAME_MAP_FILE = data_path('alias_names.json')
+LANG_FILE = setting_path('lang')
+HIDDEN_APPS_FILE = data_path('hidden_apps.json')
+PAGES_FILE = data_path('pages.json')      # with separate pages: which page each icon is on
+VERSION = "0.0.19"
+NAME = 'Raspberry'      # one Raspberry now: no "Pro" in any name (Ryan 2026-11-18)
 
 os.environ["QT_QUICK_BACKEND"] = "metal"
 
@@ -93,28 +216,6 @@ def save_alias_name_map(data: dict):
         pass
 
 
-def load_display_profile_cache():
-    """
-    Persisted auto-compact decisions keyed by screen name + resolution.
-    """
-    try:
-        if os.path.exists(DISPLAY_PROFILE_CACHE_FILE):
-            with open(DISPLAY_PROFILE_CACHE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    return data
-    except Exception:
-        pass
-    return {}
-
-
-def save_display_profile_cache(data: dict):
-    try:
-        with open(DISPLAY_PROFILE_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
 def _normalize_display_name(name: str) -> str:
     if not name:
         return ""
@@ -141,110 +242,69 @@ def is_dark_theme(app):
     style = defaults.stringForKey_("AppleInterfaceStyle")
     return style == "Dark"
 
-def set_light_palette(app):
-    palette = QPalette()
-    palette.setColor(QPalette.ColorRole.Window, QColor(255, 255, 255))
-    palette.setColor(QPalette.ColorRole.WindowText, QColor(0, 0, 0))
-    palette.setColor(QPalette.ColorRole.Base, QColor(255, 255, 255))
-    palette.setColor(QPalette.ColorRole.Text, QColor(0, 0, 0))
-    palette.setColor(QPalette.ColorRole.Button, QColor(240, 240, 240))
-    palette.setColor(QPalette.ColorRole.ButtonText, QColor(0, 0, 0))
-    app.setPalette(palette)
-    light_sheet = '''
-    QTextEdit{
-        border: 1px grey;  
-        border-radius:4px;
-        padding: 1px 5px 1px 3px; 
-        background-clip: border;
-        background-color: #F3F2EE;
-        color: #000000;
-        font: 14pt;
-    }
-    QListWidget{
-        border: 1px grey;  
-        border-radius:4px;
-        padding: 1px 5px 1px 3px; 
-        background-clip: border;
-        background-color: #F3F2EE;
-        color: #000000;
-        font: 14pt;
-    }
-    QLabel{
-        color: #000000;
-    }
-    '''
-    app.setStyleSheet(light_sheet)
+# The system's new design (Liquid Glass title bars, the new traffic lights) for this run only, declared
+# before the QApplication exists (style book 5.7.2). Nothing is written to the settings.
+if sys.platform == "darwin":
+    try:
+        NSUserDefaults.standardUserDefaults().registerDefaults_(
+            {'com.apple.SwiftUI.IgnoreSolariumLinkedOnCheck': True})
+    except Exception:
+        pass
 
-def set_dark_palette(app):
-    palette = QPalette()
-    palette.setColor(QPalette.ColorRole.Window, QColor(30, 30, 30))
-    palette.setColor(QPalette.ColorRole.WindowText, QColor(220, 220, 220))
-    palette.setColor(QPalette.ColorRole.Base, QColor(40, 40, 40))
-    palette.setColor(QPalette.ColorRole.Text, QColor(220, 220, 220))
-    palette.setColor(QPalette.ColorRole.Button, QColor(50, 50, 50))
-    palette.setColor(QPalette.ColorRole.ButtonText, QColor(220, 220, 220))
-    app.setPalette(palette)
-    dark_sheet = '''
-    QTextEdit{
-        border: 1px grey;  
-        border-radius:4px;
-        padding: 1px 5px 1px 3px; 
-        background-clip: border;
-        background-color: #2D2D2D;
-        color: #FFFFFF;
-        font: 14pt;
-    }
-    QListWidget{
-        border: 1px grey;  
-        border-radius:4px;
-        padding: 1px 5px 1px 3px; 
-        background-clip: border;
-        background-color: #2D2D2D;
-        color: #FFFFFF;
-        font: 14pt;
-    }
-    QLabel{
-        color: #FFFFFF;
-    }
-        '''
-    app.setStyleSheet(dark_sheet)
+# ── "Show on all Spaces" over full-screen apps (Ryan 2026-11-19; measured on macOS 27) ───────────────
+# A window of an app WITH a Dock icon is kept off other apps' full-screen Spaces — unless its marks
+# (join all Spaces + full-screen auxiliary) were put on while the app had no Dock icon; then they hold
+# after the icon is there, for as long as they are not switched off and on again. So, with the switch
+# on, Raspberry starts without its Dock icon, builds its windows and marks them, and then shows the
+# icon once (show_dock_icon). Nothing is flipped later: each flip makes the Dock jump.
+def all_spaces_setting_on() -> bool:
+    try:
+        return open(setting_path("show_on_all_spaces"), "r", encoding="utf-8").read().strip() == "1"
+    except Exception:
+        return False
 
 
-class ThemeObserver(NSObject):
-    def initWithApp_(self, app):
-        self = objc.super(ThemeObserver, self).init()
-        self.app = app
-        return self
-
-    def themeChanged_(self, notification):
-        # 主题变更时自动切换 palette
-        if is_dark_theme(self.app):
-            set_dark_palette(self.app)
-            #print("Dark theme changed")
-        else:
-            set_light_palette(self.app)
-            #print("Light theme changed")
+def start_without_dock_icon() -> bool:
+    """Before the QApplication exists: this run starts as an app without a Dock icon."""
+    if sys.platform != "darwin":
+        return False
+    try:
+        os.environ['QT_MAC_DISABLE_FOREGROUND_APPLICATION_TRANSFORM'] = '1'   # Qt must not bring the icon itself
+        NSBundle.mainBundle().infoDictionary()['LSUIElement'] = '1'
+        return True
+    except Exception:
+        return False
 
 
-def install_theme_observer(app):
-    observer = ThemeObserver.alloc().initWithApp_(app)
-    center = NSDistributedNotificationCenter.defaultCenter()
-    center.addObserver_selector_name_object_(
-        observer,
-        NSSelectorFromString("themeChanged:"),
-        "AppleInterfaceThemeChangedNotification",
-        None
-    )
-    return observer
+def dock_icon_shown() -> bool:
+    try:
+        return sys.platform != "darwin" or int(NSApp.activationPolicy()) == 0
+    except Exception:
+        return True
+
+
+def show_dock_icon() -> None:
+    """The Dock icon appears (once; harmless when it is there already)."""
+    try:
+        if sys.platform == "darwin" and int(NSApp.activationPolicy()) != 0:
+            NSApp.setActivationPolicy_(0)
+    except Exception:
+        pass
+
+
+# only the real program starts hidden (__main__); whoever loads this file otherwise decides for itself
+STARTED_WITHOUT_DOCK_ICON = __name__ == "__main__" and all_spaces_setting_on() and start_without_dock_icon()
 
 app = QApplication(sys.argv)
+if __name__ == "__main__" and not STARTED_WITHOUT_DOCK_ICON:
+    show_dock_icon()        # the packaged app is declared icon-less (Raspberry.spec): switch off → icon at once
 
-if is_dark_theme(app):
-    set_dark_palette(app)
-else:
-    set_light_palette(app)
-
-theme_observer = install_theme_observer(app)
+# UI STYLE BOOK: /Users/ryanshen/Documents/A-workingfilewithp3.11/UI_STYLEBOOK_macOS27.md (section 5.13).
+# The glass functions are Broccoli's, in glass_kit.py; Raspberry's own parts are in raspberry_ui.py.
+import glass_kit
+import raspberry_ui
+from glass_kit import WhiteButton, MacNormalButton, on_theme_changed, install_theme_observer
+from raspberry_ui import make_native_glass_window, install_native_glass_window_class
 
 # 获取沙盒 Application Support 路径
 base_dir = Path.home() / "Library/Application Support" / 'com.ryanthehito.raspberry'
@@ -272,6 +332,153 @@ def clean_env_for_child():
     ]:
         env.pop(key, None)
     return env
+
+
+# ── The Dock's auto-hide, set through System Events ─────────────────────────────────────────────────
+# One call takes about 0.18 s, and the launcher made it inside every open and every close, before its
+# first frame — even when the Dock was already as wanted (measured 2026-11-22). Now: off the main
+# thread, one at a time, the newest wish wins, and nothing is sent when the Dock is already so.
+_DOCK_JOB = {'want': None, 'running': False}
+_DOCK_LOCK = threading.Lock()
+
+
+def dock_autohide_now():
+    """The Dock's auto-hide as its settings say (True / False), or None when it cannot be read."""
+    try:
+        from CoreFoundation import CFPreferencesAppSynchronize, CFPreferencesCopyAppValue
+        CFPreferencesAppSynchronize('com.apple.dock')
+        value = CFPreferencesCopyAppValue('autohide', 'com.apple.dock')
+        return bool(value) if value is not None else False    # never set = the Dock stays
+    except Exception:
+        return None
+
+
+def _dock_worker():
+    done = None
+    while True:
+        with _DOCK_LOCK:
+            want = _DOCK_JOB['want']
+            if want == done:
+                _DOCK_JOB['running'] = False
+                return
+        try:
+            if dock_autohide_now() != want:
+                script = 'tell application "System Events" to set the autohide of dock preferences to %s' % (
+                    'true' if want else 'false')
+                subprocess.run(["osascript", "-e", script], env=clean_env_for_child())
+        except Exception:
+            pass
+        done = want
+
+
+def set_dock_autohide(hidden: bool):
+    """Ask for the Dock hidden (True) or kept showing (False); returns at once."""
+    with _DOCK_LOCK:
+        _DOCK_JOB['want'] = bool(hidden)
+        if _DOCK_JOB['running']:
+            return
+        _DOCK_JOB['running'] = True
+    try:
+        threading.Thread(target=_dock_worker, daemon=True, name='raspberry-dock').start()
+    except Exception:
+        with _DOCK_LOCK:
+            _DOCK_JOB['running'] = False
+
+
+def wait_for_dock(timeout=3.0):
+    """At quit: let a Dock change that is under way finish (the Dock must not stay hidden)."""
+    end = time.time() + timeout
+    while time.time() < end:
+        with _DOCK_LOCK:
+            if not _DOCK_JOB['running']:
+                return True
+        time.sleep(0.02)
+    return False
+
+
+atexit.register(wait_for_dock)
+
+
+def _four_cc(code: str) -> int:
+    return int.from_bytes(code.encode('ascii'), 'big')
+
+
+def launched_by_user(event) -> bool:
+    """From the Apple event macOS starts an app with: True when the user opened it (Dock, Finder,
+    Spotlight, `open`), False when macOS started it at login (a login item or a service item) or when
+    it cannot be told."""
+    try:
+        if event is None or event.eventClass() != _four_cc('aevt') or event.eventID() != _four_cc('oapp'):
+            return False
+        prop = event.paramDescriptorForKeyword_(_four_cc('prdt'))          # keyAEPropData
+        if prop is not None and prop.enumCodeValue() in (_four_cc('lgit'),  # keyAELaunchedAsLogInItem
+                                                         _four_cc('lgsi')): # keyAELaunchedAsServiceItem
+            return False
+        return True
+    except Exception:
+        return False
+
+# ── Raspberry's functions for an assistant app (Ryan 2026-11-23: 「所有的功能挂载在 Broccoli」) ──
+# The way in is the same for every app (app_mcp_host.py: a service on this Mac only + a card in the
+# family's folder); raspberry_mcp.py is the list of Raspberry's tools. 2026-11-24 (Ryan: "接口通用，别的也能
+# 接"): always started, assistant app or not; any other AI app reaches it through the bridge (Raspberry
+# started with --mcp-stdio; the menu's "Use in other AI apps…" copies the setup).
+_ASSISTANT_HOST = {'host': None, 'bridge': None}
+
+
+def start_assistant_tools(window, card_dir=None) -> bool:
+    try:
+        import raspberry_mcp
+        from PyQt6.QtCore import QObject, pyqtSignal, Qt
+
+        class _MainThreadBridge(QObject):
+            asked = pyqtSignal(object)
+
+            def __init__(self):
+                super().__init__()
+                self.asked.connect(self._run, Qt.ConnectionType.QueuedConnection)
+
+            def _run(self, job):
+                fn, box, done = job
+                try:
+                    box['value'] = fn()
+                except BaseException as exc:        # handed to the thread that asked
+                    box['error'] = exc
+                done.set()
+
+        bridge = _MainThreadBridge()
+
+        def run_on_main(fn):
+            box, done = {}, threading.Event()
+            bridge.asked.emit((fn, box, done))
+            done.wait()
+            if 'error' in box:
+                raise box['error']
+            return box.get('value')
+
+        launch = None
+        if getattr(sys, 'frozen', False):           # the built app can be opened again; quietly ("autostart")
+            bundle = str(Path(sys.executable).parent.parent.parent)
+            if bundle.endswith('.app'):
+                launch = {'bundle_id': 'com.ryanthehito.raspberry', 'path': bundle, 'args': ['autostart']}
+        host = raspberry_mcp.build_host(globals(), window)
+        if not host.start(run_on_main=run_on_main, launch=launch, card_dir=card_dir):
+            return False
+        _ASSISTANT_HOST.update(host=host, bridge=bridge)
+        return True
+    except Exception:
+        logging.exception('assistant tools not started')
+        return False
+
+
+def stop_assistant_tools():
+    host, _ASSISTANT_HOST['host'] = _ASSISTANT_HOST['host'], None
+    if host is not None:
+        try:
+            host.stop()
+        except Exception:
+            pass
+
 
 # copy items from app to basepath
 old_base_path = Path('/Applications/Raspberry.app/Contents/Resources/')
@@ -349,6 +556,70 @@ def load_app_order():
         return []
     with open(APP_ORDER_FILE, 'r') as f:
         return json.load(f)
+
+# ── where apps are looked for ──
+# Always: the Mac's Applications folders. On request (menu, off by default — Ryan 2026-11-16: 「加进来，
+# 但默认关着」): the user's own ~/Applications too (apps installed for this user only, web apps the
+# browsers "install", launchers of tools — and little helper apps, which is why it is not on by default).
+SYSTEM_APP_DIRS = ["/Applications", "/System/Applications", "/System/Volumes/Preboot/Cryptexes/App/System/Applications"]
+USER_APPS_DIR = os.path.expanduser("~/Applications")
+USER_APPS_SETTING_FILE = setting_path("user_apps")
+USER_APPS_MEMORY_FILE = data_path("user_apps_places.json")
+
+
+def user_apps_enabled() -> bool:
+    try:
+        with open(USER_APPS_SETTING_FILE, "r") as f:
+            return f.read().strip() == "1"
+    except Exception:
+        return False
+
+
+def write_user_apps_enabled(enabled: bool):
+    try:
+        with open(USER_APPS_SETTING_FILE, "w") as f:
+            f.write("1" if enabled else "0")
+    except Exception:
+        pass
+
+
+def is_user_app_path(path) -> bool:
+    return str(path).startswith(USER_APPS_DIR.rstrip('/') + '/')
+
+
+def app_scan_dirs():
+    dirs = list(SYSTEM_APP_DIRS)
+    if user_apps_enabled() and os.path.isdir(USER_APPS_DIR):
+        dirs.append(USER_APPS_DIR)
+    return dirs
+
+
+def load_hidden_apps() -> list:
+    """The apps the user does not want to see in Raspberry (Ryan 2026-11-16: 「黑名单……加入黑名单的
+    软件不会显示在表面」): their paths, in the order they were hidden."""
+    try:
+        with open(HIDDEN_APPS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return [p for p in data if isinstance(p, str)] if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def save_hidden_apps(paths):
+    try:
+        with open(HIDDEN_APPS_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(dict.fromkeys(paths)), f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def allowed_app_paths(paths):
+    """The paths Raspberry shows: without the hidden apps, and without the user's own Applications
+    folder while that is switched off."""
+    hidden = set(load_hidden_apps())
+    user = user_apps_enabled()
+    return [p for p in paths if p not in hidden and (user or not is_user_app_path(p))]
+
 
 def save_app_paths(app_paths):
     with open(APP_PATHS_FILE, 'w') as f:
@@ -549,44 +820,87 @@ def find_top_level_apps(app_dirs):  # 这个是只 get 到浅层文件夹的.app
 #     return apps
 
 
+# The bundle name names the app's icon file in the cache. Reading it meant opening and parsing every
+# app's Info.plist at each start: about 0.6 s for 330 apps (measured 2026-11-22, "一点开…非常慢").
+# Kept here with the plist's size and modification time; the plist is read again only when it changed.
+BUNDLE_NAME_MEMO_FILE = os.path.join(CACHE_DIR, 'bundle_names.json')
+
+
+def load_bundle_name_memo() -> dict:
+    try:
+        with open(BUNDLE_NAME_MEMO_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_bundle_name_memo(memo: dict):
+    try:
+        tmp = BUNDLE_NAME_MEMO_FILE + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(memo, f, ensure_ascii=False)
+        os.replace(tmp, BUNDLE_NAME_MEMO_FILE)
+    except Exception:
+        pass
+
+
+def bundle_name(app_path, memo=None):
+    """(name, memo entry): the app's name from its Info.plist (or an iOS app's iTunesMetadata.plist),
+    else its folder name. With `memo`, an unchanged plist is not opened."""
+    info_plist = os.path.join(app_path, 'Contents', 'Info.plist')
+    itunes_plist = os.path.join(app_path, 'Wrapper', 'iTunesMetadata.plist')
+    stamp = None
+    for kind, plist_path in (('info', info_plist), ('itunes', itunes_plist)):
+        try:
+            st = os.stat(plist_path)
+        except OSError:
+            continue
+        stamp = [kind, st.st_size, st.st_mtime_ns]
+        break
+    entry = (memo or {}).get(app_path)
+    if (stamp is not None and isinstance(entry, list) and len(entry) == 2 and entry[1] == stamp
+            and isinstance(entry[0], str) and entry[0]):
+        return entry[0], entry
+    name = None
+    if stamp is not None and stamp[0] == 'info':     # 1. 优先 Info.plist
+        try:
+            with open(info_plist, 'rb') as f:
+                plist = plistlib.load(f)
+            name = plist.get('CFBundleDisplayName') or plist.get('CFBundleName') or os.path.basename(app_path)[:-4]
+        except Exception as e:
+            print(f"Failed to parse Info.plist for {app_path}: {e}")
+    elif stamp is not None:                          # 2. iOS 应用的 iTunesMetadata.plist
+        try:
+            with open(itunes_plist, 'rb') as f:
+                plist = plistlib.load(f)
+            name = plist.get('title') or plist.get('itemName') or os.path.basename(app_path)[:-4]
+        except Exception as e:
+            print(f"Failed to parse iTunesMetadata.plist for {app_path}: {e}")
+    if not name:                                     # 3. 都没有就用文件夹名
+        name = os.path.basename(app_path)[:-4]
+    return name, ([name, stamp] if stamp is not None else None)
+
+
 def get_applications():  # 兼容加载检查iOS软件
     sync_app_paths()
-    app_paths = load_app_paths()
+    app_paths = allowed_app_paths(load_app_paths())
     if not app_paths:
-        app_dirs = ["/Applications", "/System/Applications", "/System/Volumes/Preboot/Cryptexes/App/System/Applications"]
-        app_paths = find_top_level_apps(app_dirs)
+        app_paths = allowed_app_paths(find_top_level_apps(app_scan_dirs()))
         save_app_paths(app_paths)
     display_name_map = load_display_name_map()
     alias_name_map = load_alias_name_map()
     display_dirty = False
     alias_dirty = False
+    old_memo = load_bundle_name_memo()
+    new_memo = {}
     apps = []
     seen_paths = set()
     for app_path in app_paths:
         seen_paths.add(app_path)
-        info_plist = os.path.join(app_path, 'Contents', 'Info.plist')
-        itunes_plist = os.path.join(app_path, 'Wrapper', 'iTunesMetadata.plist')
-        name = None
-        plist = None
-        # 1. 优先 Info.plist
-        if os.path.exists(info_plist):
-            try:
-                with open(info_plist, 'rb') as f:
-                    plist = plistlib.load(f)
-                name = plist.get('CFBundleDisplayName') or plist.get('CFBundleName') or os.path.basename(app_path)[:-4]
-            except Exception as e:
-                print(f"Failed to parse Info.plist for {app_path}: {e}")
-        # 2. iOS 应用的 iTunesMetadata.plist
-        elif os.path.exists(itunes_plist):
-            try:
-                with open(itunes_plist, 'rb') as f:
-                    plist = plistlib.load(f)
-                name = plist.get('title') or plist.get('itemName') or os.path.basename(app_path)[:-4]
-            except Exception as e:
-                print(f"Failed to parse iTunesMetadata.plist for {app_path}: {e}")
-        # 3. 都没有就用文件夹名
-        if not name:
-            name = os.path.basename(app_path)[:-4]
+        name, memo_entry = bundle_name(app_path, old_memo)
+        if memo_entry is not None:
+            new_memo[app_path] = memo_entry
         display_name = get_finder_display_name(app_path)
         if _normalize_display_name(display_name_map.get(app_path, "")) != display_name:
             display_dirty = True
@@ -620,6 +934,8 @@ def get_applications():  # 兼容加载检查iOS软件
         save_display_name_map(display_name_map)
     if alias_dirty:
         save_alias_name_map(alias_name_map)
+    if new_memo != old_memo:
+        save_bundle_name_memo(new_memo)
     return apps
 
 
@@ -788,6 +1104,7 @@ def safe_delete_widget(w):
     try:
         if w is not None and not sip.isdeleted(w):
             # 先断开父子关系，再让 Qt 异步回收
+            w.hide()            # first: else Qt's pending "show" makes it a window of its own
             w.setParent(None)
             w.deleteLater()
     except RuntimeError:
@@ -797,8 +1114,39 @@ def safe_delete_widget(w):
 # 拖拽排序常量（与你现有布局一致）
 GRID_COLS = 7
 GRID_ROWS = 5
-ICON_W = 140
+CELL_FULL = 140               # an icon's cell (icon 100 + its name) when the screen has the room
+CELL_MIN = 88                 # never smaller than this
+ICON_W = 140                  # the cell in use now (set_cell_size): the 7 × 5 cells always fit the screen
 ICON_H = 140
+
+
+def cell_size() -> int:
+    return ICON_W
+
+
+def set_cell_size(value) -> bool:
+    """The cell every icon is built with from now on. True when it changed."""
+    global ICON_W, ICON_H
+    value = max(CELL_MIN, min(CELL_FULL, int(value)))
+    changed = value != ICON_W
+    ICON_W = ICON_H = value
+    return changed
+
+
+def icon_side(cell=None) -> int:
+    """The icon's square in a cell: the cell minus the room of the two lines of its name."""
+    return max(40, (cell_size() if cell is None else int(cell)) - 40)
+
+
+def tile_side(cell=None) -> int:
+    """A group's glass tile: 80 in a full cell (an app icon's visible size)."""
+    return int(round(icon_side(cell) * raspberry_ui.TILE_SIZE / 100.0))
+
+
+def tile_radius(cell=None) -> float:
+    return tile_side(cell) * raspberry_ui.TILE_RADIUS / float(raspberry_ui.TILE_SIZE)
+
+
 AUTO_PAGE_EDGE_PX = 40        # 靠左右边缘触发自动翻页的感应宽度
 AUTO_PAGE_DELAY_MS = 500      # 悬停翻页延迟
 
@@ -848,7 +1196,7 @@ class InsertCursorOverlay(QWidget):
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor(0, 120, 255), 3)
+        pen = QPen(raspberry_ui.accent_color(), 3)
         painter.setPen(pen)
         painter.drawLine(self._line_x, self._line_top, self._line_x, self._line_bottom)
 
@@ -890,7 +1238,8 @@ class AppGridWidget(QWidget):
         self._edge_hover_info = None  # (direction, app_path)
 
     def configure(self, get_page_items, on_drop_app, request_page_change,
-                  accept_groups=True, clamp_to_app_zone=False, enable_drag=True):
+                  accept_groups=True, clamp_to_app_zone=False, enable_drag=True, cell_rect=None):
+        self._cell_rect_provider = cell_rect      # (row, col) → QRect, where the host knows its cells
         self._get_page_items = get_page_items
         self._on_drop_app = on_drop_app
         self._request_page_change = request_page_change
@@ -923,6 +1272,7 @@ class AppGridWidget(QWidget):
             return
 
         self._ensure_overlay()
+        self._dragging_group = event.mimeData().text().startswith(GROUP_DRAG_PREFIX)
         slot_idx, line_x, line_top, line_bottom = self._calc_insert_visuals(event.position().toPoint())
         items = self._get_page_items() if self._get_page_items else []
         n = min(len(items), GRID_COLS * GRID_ROWS)
@@ -975,6 +1325,7 @@ class AppGridWidget(QWidget):
         self._edge_hover_timer.stop()
         self._edge_hover_info = None
         pos = event.position().toPoint()
+        self._dragging_group = event.mimeData().text().startswith(GROUP_DRAG_PREFIX)
         slot_idx, *_ = self._calc_insert_visuals(pos)
         try:
             self.overlay.hide_line()
@@ -1053,10 +1404,19 @@ class AppGridWidget(QWidget):
 
         # 主界面apps区约束
         if self._clamp_to_app_zone and self._accept_groups:
-            first_app_slot, last_app_slot = self._page_app_slot_range(items)
-            if first_app_slot is None:
-                return None, None, None, None
-            best_idx = max(first_app_slot, min(best_idx, last_app_slot + 1))
+            leading = 0                      # the page's groups stand first
+            for typ, _obj in items[:GRID_COLS * GRID_ROWS]:
+                if typ != 'group':
+                    break
+                leading += 1
+            if getattr(self, '_dragging_group', False):
+                best_idx = max(0, min(best_idx, leading))
+            else:
+                best_idx = max(leading, min(best_idx, n))
+            if best_idx >= GRID_COLS * GRID_ROWS:      # after the page's last cell
+                last = self._cell_rect(GRID_ROWS - 1, GRID_COLS - 1)
+                return best_idx, last.right(), last.top(), last.bottom()
+            target_cell = self._cell_rect(best_idx // GRID_COLS, best_idx % GRID_COLS)
 
         line_x = target_cell.left()
         return best_idx, line_x, target_cell.top(), target_cell.bottom()
@@ -1067,6 +1427,11 @@ class AppGridWidget(QWidget):
         为稳妥：以第一行已有的任意控件为基准推算格子宽高与间距。
         如该行为空，则使用默认 ICON_W/H 和布局 spacing。
         """
+        provider = getattr(self, '_cell_rect_provider', None)
+        if provider is not None:
+            rect = provider(row, col)
+            if rect is not None:
+                return rect
         layout = self.parent().layout() if self.parent() else None
         # 直接根据已有控件几何推算
         children = [w for w in self.findChildren(QWidget) if w is not self.overlay]
@@ -1143,44 +1508,6 @@ class AppGridWidget(QWidget):
             self.overlay = InsertCursorOverlay(self)
 
 
-class UpdateCheckWorker(QThread):
-    update_available = pyqtSignal(str)  # latest version, e.g., 'v0.0.13'
-    checked_ok = pyqtSignal(str)        # latest version (even if not newer),用于日志或状态
-    checked_error = pyqtSignal(str)     # error message
-
-    def __init__(self, current_version: str, interval_seconds: int = 86400, parent=None):
-        super().__init__(parent)
-        self._running = True
-        self.current_version = current_version  # e.g., 'v0.0.12'
-        self.interval_seconds = interval_seconds
-
-    def stop(self):
-        self._running = False
-
-    def run(self):
-        # 循环：只要应用在运行，就每隔 interval 检查一次
-        while self._running:
-            try:
-                text = WindowUpdate.fetch_latest_version_text()
-                latest = WindowUpdate.extract_latest_tag(text) if text else None
-                if latest:
-                    self.checked_ok.emit(latest)
-                    if is_newer_version(latest, 'v' + VERSION):
-                        # 通知主线程有新版本
-                        self.update_available.emit(latest)
-                else:
-                    self.checked_error.emit("No version tag found")
-            except Exception as e:
-                self.checked_error.emit(str(e))
-
-            # 可中断的“休眠”24小时
-            for _ in range(self.interval_seconds):
-                if not self._running:
-                    return
-                self.msleep(1000)
-
-
-
 class AppIndexWorker(QThread):
     finished = pyqtSignal(object)  # apps
 
@@ -1189,27 +1516,24 @@ class AppIndexWorker(QThread):
         self.finished.emit(apps)
 
 
-class IndexingDialog(QDialog):
+class IndexingDialog(raspberry_ui.BusyCard):
+    """The small glass card shown while the applications are indexed (style book 5.13)."""
+
     def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
-        self.setModal(True)
-        self.setFixedSize(340, 120)
-        layout = QVBoxLayout()
-        label = QLabel(self.tr("Raspberry is indexing applications, please wait and do not close this app. Raspberry will be ready after this window disappers."))
-        label.setWordWrap(True)
-        layout.addWidget(label)
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 0)  # 无限进度条
-        layout.addWidget(self.progress)
-        self.setLayout(layout)
+        super().__init__(QCoreApplication.translate(
+            "IndexingDialog",
+            "Raspberry is indexing applications, please wait and do not close this app. Raspberry will be ready after this window disappers."),
+            parent)
 
 
 class EmptyButton(QPushButton):
     def __init__(self, main_window=None, parent=None):
         super().__init__(parent)
         self.main_window = main_window          # 保存主窗引用
-        self.setFixedSize(135, 128)
+        self.setFixedSize(cell_size(), cell_size())  # exactly an icon's cell: every row is the same height
+        # macOS lays a push button out by a rectangle a few points off its own (differently for flat ones):
+        # rows with icons and rows of blanks then got different heights — use the widget's own rectangle
+        self.setAttribute(Qt.WidgetAttribute.WA_LayoutUsesWidgetRect, True)
         self.setFlat(True)
         self.setEnabled(True)                  # 必须能接收事件
         # 和背景一致：完全透明
@@ -1231,78 +1555,34 @@ class EmptyButton(QPushButton):
 
 
 class SearchLineEdit(QLineEdit):
+    """The launcher's search (style book 5.5 A / 5.13): a glass capsule 36 high with the drawn magnifier
+    and the field's own clear button; 500 wide, 750 while it has the focus. The glass lies under the
+    text (the window is transparent); without glass the field fills its capsule itself."""
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._base_width = 500
         self._expanded_width = int(self._base_width * 1.5)
+        self.setFixedHeight(raspberry_ui.SEARCH_HEIGHT)
         self.setFixedWidth(self._base_width)
         self._anim = QPropertyAnimation(self, b"minimumWidth")
         self._anim.setDuration(250)
         self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self.setStyleSheet("""
-            QLineEdit {
-                border-radius: 18px;
-                padding-left: 20px;
-                font-size: 16px;
-                background: rgba(255,255,255,0.35);
-                height: 36px;
-            }
-            QLineEdit:focus {
-                border: 1.5px solid #0085FF;
-                background: rgba(255,255,255,0.35);
-            }
-        """)
+        self.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
+        glass_kit.add_search_glyph(self)
+        self.setClearButtonEnabled(True)
+        self.apply_theme()
 
-        # “X”按钮
-        self.clear_btn = QToolButton(self)
-        self.clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.clear_btn.setStyleSheet("""
-                    QToolButton {
-                        border: none;
-                        background: transparent;
-                    }
-                """)
-        self.clear_btn.setIcon(self._make_x_icon())
-        self.clear_btn.setFixedSize(24, 24)
-        self.clear_btn.hide()
-        self.clear_btn.clicked.connect(self.clear)
-        self.textChanged.connect(self._update_clear_btn)
+    def apply_theme(self, dark=None):
+        if dark is None:
+            dark = is_dark_theme(None)
+        self.setStyleSheet(raspberry_ui.search_field_stylesheet(dark, raspberry_ui.glass_active(self)))
 
-    def _make_x_icon(self):
-        # 画一个圆形背景+“X”
-        pix = QPixmap(24, 24)
-        pix.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pix)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        # 圆形底
-        painter.setBrush(QColor(220, 220, 220, 180))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(0, 0, 24, 24)
-        # “X”
-        pen = QPen(QColor(80, 80, 80), 2)
-        painter.setPen(pen)
-        painter.drawLine(7, 7, 17, 17)
-        painter.drawLine(17, 7, 7, 17)
-        painter.end()
-        return QIcon(pix)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._update_clear_btn_pos()
-
-    def _update_clear_btn_pos(self):
-        # 右侧内边距
-        margin = 8
-        x = self.width() - self.clear_btn.width() - margin
-        y = (self.height() - self.clear_btn.height()) // 2
-        self.clear_btn.move(x, y)
-
-    def _update_clear_btn(self):
-        # 只有聚焦且有内容时显示
-        if self.hasFocus() and self.text():
-            self.clear_btn.show()
-        else:
-            self.clear_btn.hide()
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not raspberry_ui.glass_active(self) and raspberry_ui.under_glass(
+                self, raspberry_ui.SEARCH_HEIGHT / 2.0) is not None:
+            self.apply_theme()
 
     def focusInEvent(self, event):
         self._anim.stop()
@@ -1310,7 +1590,6 @@ class SearchLineEdit(QLineEdit):
         self._anim.setEndValue(self._expanded_width)
         self._anim.start()
         super().focusInEvent(event)
-        self._update_clear_btn()
         self.update()
 
     def focusOutEvent(self, event):
@@ -1319,615 +1598,99 @@ class SearchLineEdit(QLineEdit):
         self._anim.setEndValue(self._base_width)
         self._anim.start()
         super().focusOutEvent(event)
-        self._update_clear_btn()
         self.update()
 
     def setMinimumWidth(self, w):
         self.setFixedWidth(w)
-        self._update_clear_btn()
         self.update()
 
     def minimumWidth(self):
         return self.width()
 
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        # 高光特效
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        rect = self.rect().adjusted(1, 1, 0, 0)
-        radius = rect.height() // 2
 
-        # 生成圆角矩形路径上的点
-        points = self.rounded_rect_points(rect, radius, num_points=240)
-        total = len(points)
-        # 左上高光
-        self.draw_highlight_with_fade(painter, points, int(0.02*total), int(0.22*total), fade_len=15, base_width=1, reverse=False)
-        # 右下高光
-        self.draw_highlight_with_fade(painter, points, int(0.55*total), int(0.87*total), fade_len=15, base_width=1, reverse=True)
-
-    @staticmethod
-    def rounded_rect_points(rect, radius, num_points=100):
-        points = []
-        for i in range(num_points//4):
-            angle = 180 + 90 * (i / (num_points//4))
-            x = rect.left() + radius + radius * math.cos(math.radians(angle))
-            y = rect.top() + radius + radius * math.sin(math.radians(angle))
-            points.append(QPointF(x, y))
-        for i in range(num_points//4):
-            angle = 270 + 90 * (i / (num_points//4))
-            x = rect.right() - radius + radius * math.cos(math.radians(angle))
-            y = rect.top() + radius + radius * math.sin(math.radians(angle))
-            points.append(QPointF(x, y))
-        for i in range(num_points//4):
-            angle = 0 + 90 * (i / (num_points//4))
-            x = rect.right() - radius + radius * math.cos(math.radians(angle))
-            y = rect.bottom() - radius + radius * math.sin(math.radians(angle))
-            points.append(QPointF(x, y))
-        for i in range(num_points//4):
-            angle = 90 + 90 * (i / (num_points//4))
-            x = rect.left() + radius + radius * math.cos(math.radians(angle))
-            y = rect.bottom() - radius + radius * math.sin(math.radians(angle))
-            points.append(QPointF(x, y))
-        return points
-
-    @staticmethod
-    def draw_highlight_with_fade(painter, points, start_idx, end_idx, fade_len=10, base_width=3, reverse=False):
-        if not reverse:
-            grad_main = QLinearGradient(points[start_idx], points[end_idx])
-            grad_main.setColorAt(0, QColor(255,255,255,0))
-            grad_main.setColorAt(1, QColor(255,255,255,255))
-            pen_main = QPen(QBrush(grad_main), base_width, cap=Qt.PenCapStyle.RoundCap)
-            painter.setPen(pen_main)
-            path_main = QPainterPath()
-            path_main.moveTo(points[start_idx])
-            for pt in points[start_idx+1:end_idx]:
-                path_main.lineTo(pt)
-            painter.drawPath(path_main)
-
-            fade_start = end_idx
-            fade_end = min(end_idx + fade_len, len(points)-1)
-            grad_fade = QLinearGradient(points[fade_start], points[fade_end])
-            grad_fade.setColorAt(0, QColor(255,255,255,255))
-            grad_fade.setColorAt(1, QColor(255,255,255,0))
-            pen_fade = QPen(QBrush(grad_fade), base_width, cap=Qt.PenCapStyle.RoundCap)
-            painter.setPen(pen_fade)
-            path_fade = QPainterPath()
-            path_fade.moveTo(points[fade_start])
-            for pt in points[fade_start+1:fade_end]:
-                path_fade.lineTo(pt)
-            painter.drawPath(path_fade)
-        else:
-            grad_main = QLinearGradient(points[end_idx], points[start_idx])
-            grad_main.setColorAt(0, QColor(255,255,255,0))
-            grad_main.setColorAt(1, QColor(255,255,255,255))
-            pen_main = QPen(QBrush(grad_main), base_width, cap=Qt.PenCapStyle.RoundCap)
-            painter.setPen(pen_main)
-            path_main = QPainterPath()
-            path_main.moveTo(points[end_idx])
-            for pt in reversed(points[start_idx+1:end_idx+1]):
-                path_main.lineTo(pt)
-            painter.drawPath(path_main)
-
-            fade_start = start_idx
-            fade_end = max(start_idx - fade_len, 0)
-            grad_fade = QLinearGradient(points[fade_start], points[fade_end])
-            grad_fade.setColorAt(0, QColor(255,255,255,255))
-            grad_fade.setColorAt(1, QColor(255,255,255,0))
-            pen_fade = QPen(QBrush(grad_fade), base_width, cap=Qt.PenCapStyle.RoundCap)
-            painter.setPen(pen_fade)
-            path_fade = QPainterPath()
-            path_fade.moveTo(points[fade_start])
-            for pt in reversed(points[fade_end:fade_start]):
-                path_fade.lineTo(pt)
-            painter.drawPath(path_fade)
+def _alert_parts(text):
+    """(title, message) for the system alert: the first line is the title, the rest the message."""
+    text = str(text or '')
+    first, _, rest = text.partition('\n')
+    if not rest and len(first) > 90:
+        return 'Raspberry', first
+    return first, rest.strip()
 
 
-class WhiteButton(QPushButton):
-    def __init__(self, text):
-        super().__init__(text)
-        self.setFixedHeight(30)
-        self.setStyleSheet("""
-        QPushButton {
-            background-color: white;
-            color: #444;
-            border: none;
-            border-radius: 15px;
-            font-size: 13px;
-            padding: 5px 20px;
-        }
-        QPushButton:hover {
-            background-color: #f5f5f5;
-        }
-        """)
-
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(40)
-        shadow.setXOffset(0)
-        shadow.setYOffset(0)
-        shadow.setColor(QColor(0, 0, 0, 40))  # 半透明黑色阴影
-        self.setGraphicsEffect(shadow)
+def relaunch_raspberry():
+    """Quit Raspberry and open it again (what the "… will restart" notices do on OK)."""
+    time.sleep(3)
+    applescript = '''
+        if application "Raspberry" is running then
+            try
+                tell application "Raspberry"
+                    quit
+                    delay 1
+                    activate
+                end tell
+            on error number -128
+                quit application "Raspberry"
+                delay 1
+                activate application "Raspberry"
+            end try
+        end if
+        '''
+    subprocess.Popen(['osascript', '-e', applescript], env=clean_env_for_child())
 
 
-class MacWindowButton(QPushButton):
-    def __init__(self, color, symbol, parent=None):
-        super().__init__(parent)
-        self.setFixedSize(16,16)
-        self.base_color = QColor(color)
-        self.symbol = symbol  # "x", "-", "+"
-        self.hovered = False
-        self.setStyleSheet("border: none; background: transparent;")
+class CustomMessageBox:
+    """A notice or a question as the system alert (style book 5.7). Used as before:
+    CustomMessageBox(text, parent=…, buttons=(…)).exec() → the index of the button chosen."""
 
-    def enterEvent(self, event):
-        self.hovered = True
-        self.update()
-        super().enterEvent(event)
-
-    def leaveEvent(self, event):
-        self.hovered = False
-        self.update()
-        super().leaveEvent(event)
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        # # 1. 选择底色
-        # if self.hovered:
-        #     # hover 时用更深的颜色
-        #     if self.symbol == "x":
-        #         color = QColor("#BF4943")
-        #     elif self.symbol == "-":
-        #         color = QColor("#B29B32")
-        #     elif self.symbol == "+":
-        #         color = QColor("#24912D")
-        #     else:
-        #         color = self.base_color
-        # else:
-        #     color = self.base_color
-        # Draw circle
-        painter.setBrush(self.base_color)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(0, 0, self.width(), self.height())
-        # Draw symbol if hovered
-        if self.hovered:
-            pen = QPen(QColor("black"))
-            pen.setWidth(2)
-            painter.setPen(pen)
-            margin = 5  # 增大 margin，叉号更小
-            if self.symbol == "x":
-                painter.drawLine(margin, margin, self.width()-margin, self.height()-margin)
-                painter.drawLine(self.width()-margin, margin, margin, self.height()-margin)
-            elif self.symbol == "-":
-                painter.drawLine(margin, self.height()//2, self.width()-margin, self.height()//2)
-            elif self.symbol == "+":
-                painter.drawLine(self.width()//2, margin, self.width()//2, self.height()-margin)
-                painter.drawLine(margin, self.height()//2, self.width()-margin, self.height()//2)
-
-
-class CustomMessageBox(QWidget):
     def __init__(self, text, parent=None, icon=None, buttons=("OK",), default=0):
-        super().__init__(parent)
-        self.radius = 16
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
-        self.setFixedSize(400, 200)
+        self.text = text
+        self.parent = parent
+        self.buttons = [str(b) for b in buttons] or ["OK"]
+        self.default = max(0, min(int(default), len(self.buttons) - 1))
         self.result = None
 
-        # 拖动支持
-        self.drag_pos = None
-
-        # 关闭按钮
-        self.close_button = MacWindowButton("#FF605C", "x", self)
-        self.close_button.move(10, 10)
-        self.close_button.clicked.connect(self.close)
-
-        # 主内容
-        layout = QVBoxLayout()
-        layout.setContentsMargins(32, 40, 32, 32)
-        layout.setSpacing(16)
-
-        # 图标
-        if icon:
-            icon_label = QLabel()
-            icon_label.setPixmap(icon.pixmap(48, 48))
-            icon_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-            layout.addWidget(icon_label)
-
-        # 文本
-        label = QLabel(text)
-        label.setWordWrap(True)
-        label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        # label.setStyleSheet("font-size: 16px;")
-        label.setStyleSheet("""
-            font-size: 16px;
-            background-color: rgba(255,255,255,0);
-            border-radius: 8px;
-            padding: 8px;
-        """)
-        layout.addWidget(label, stretch=1)
-
-        # 按钮
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-        self.btns = []
-        for i, btn_text in enumerate(buttons):
-            btn = WhiteButton(btn_text)
-            btn.setFixedWidth(150)
-            # btn.setFixedHeight(32)
-            # btn.setStyleSheet("""
-            #     QPushButton {
-            #         background: #F2F2F2;
-            #         border-radius: 8px;
-            #         border: 1px solid #E0E0E0;
-            #         min-width: 80px;
-            #         font-size: 15px;
-            #     }
-            #     QPushButton:hover {
-            #         background: #E0E0E0;
-            #     }
-            # """)
-            btn.clicked.connect(lambda checked, idx=i: self._on_btn(idx))
-            btn_layout.addWidget(btn)
-            self.btns.append(btn)
-        btn_layout.addStretch()
-        layout.addLayout(btn_layout)
-
-        self.setLayout(layout)
-        self.btns[default].setFocus()
-
-    def _on_btn(self, idx):
-        self.result = idx
-        self.accept()
-
-    def accept(self):
-        self.close()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(self.rect())
-        path = QPainterPath()
-        path.addRoundedRect(rect, self.radius, self.radius)
-        painter.setClipPath(path)
-        if is_dark_theme(self):
-            painter.fillPath(path, QColor(30, 30, 30, 245))
-        else:
-            painter.fillPath(path, QColor(255, 255, 255, 245))
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            event.accept()
-
-    def mouseMoveEvent(self, event):
-        if event.buttons() == Qt.MouseButton.LeftButton and self.drag_pos is not None:
-            self.move(event.globalPosition().toPoint() - self.drag_pos)
-            event.accept()
+    def _ask(self):
+        title, message = _alert_parts(self.text)
+        chosen = glass_kit.ask_broccoli_message(self.parent, title, message, list(self.buttons),
+                                                self.buttons[self.default])
+        return self.buttons.index(chosen) if chosen in self.buttons else self.default
 
     def exec(self):
-        self.setWindowModality(Qt.WindowModality.ApplicationModal)
-        self.show()
-        loop = QEventLoop()
-        self.destroyed.connect(loop.quit)
-        loop.exec()
+        self.result = self._ask()
         return self.result
 
 
-class RestartMessageBox(QWidget):
-    def __init__(self, text, parent=None, icon=None, buttons=("OK",), default=0):
-        super().__init__(parent)
-        self.radius = 16
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
-        self.setFixedSize(400, 200)
-        self.result = None
-
-        # 拖动支持
-        self.drag_pos = None
-
-        # 关闭按钮
-        self.close_button = MacWindowButton("#FF605C", "x", self)
-        self.close_button.move(10, 10)
-        self.close_button.clicked.connect(self.close)
-
-        # 主内容
-        layout = QVBoxLayout()
-        layout.setContentsMargins(32, 40, 32, 32)
-        layout.setSpacing(16)
-
-        # 图标
-        if icon:
-            icon_label = QLabel()
-            icon_label.setPixmap(icon.pixmap(48, 48))
-            icon_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-            layout.addWidget(icon_label)
-
-        # 文本
-        label = QLabel(text)
-        label.setWordWrap(True)
-        label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        # label.setStyleSheet("font-size: 16px;")
-        label.setStyleSheet("""
-            font-size: 16px;
-            background-color: rgba(255,255,255,0);
-            border-radius: 8px;
-            padding: 8px;
-        """)
-        layout.addWidget(label, stretch=1)
-
-        # 按钮
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-        self.btns = []
-        for i, btn_text in enumerate(buttons):
-            btn = WhiteButton(btn_text)
-            btn.setFixedWidth(150)
-            # btn.setFixedHeight(32)
-            # btn.setStyleSheet("""
-            #     QPushButton {
-            #         background: #F2F2F2;
-            #         border-radius: 8px;
-            #         border: 1px solid #E0E0E0;
-            #         min-width: 80px;
-            #         font-size: 15px;
-            #     }
-            #     QPushButton:hover {
-            #         background: #E0E0E0;
-            #     }
-            # """)
-            btn.clicked.connect(lambda checked, idx=i: self._on_btn(idx))
-            btn_layout.addWidget(btn)
-            self.btns.append(btn)
-        btn_layout.addStretch()
-        layout.addLayout(btn_layout)
-
-        self.setLayout(layout)
-        self.btns[default].setFocus()
-
-    def _on_btn(self, idx):
-        if idx == 0:
-            time.sleep(3)
-            applescript = '''
-                if application "Raspberry" is running then
-                    try
-                        tell application "Raspberry"
-                            quit
-                            delay 1
-                            activate
-                        end tell
-                    on error number -128
-                        quit application "Raspberry"
-                        delay 1
-                        activate application "Raspberry"
-                    end try
-                end if
-                '''
-            subprocess.Popen(['osascript', '-e', applescript], env=clean_env_for_child())
-        self.result = idx
-        self.accept()
-
-    def accept(self):
-        self.close()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(self.rect())
-        path = QPainterPath()
-        path.addRoundedRect(rect, self.radius, self.radius)
-        painter.setClipPath(path)
-        if is_dark_theme(self):
-            painter.fillPath(path, QColor(30, 30, 30, 245))
-        else:
-            painter.fillPath(path, QColor(255, 255, 255, 245))
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            event.accept()
-
-    def mouseMoveEvent(self, event):
-        if event.buttons() == Qt.MouseButton.LeftButton and self.drag_pos is not None:
-            self.move(event.globalPosition().toPoint() - self.drag_pos)
-            event.accept()
+class RestartMessageBox(CustomMessageBox):
+    """The same alert; its first button restarts Raspberry."""
 
     def exec(self):
-        self.setWindowModality(Qt.WindowModality.ApplicationModal)
-        self.show()
-        loop = QEventLoop()
-        self.destroyed.connect(loop.quit)
-        loop.exec()
+        self.result = self._ask()
+        if self.result == 0:
+            relaunch_raspberry()
         return self.result
 
 
-class CustomInputDialog(QDialog):
-    """
-    Frameless input dialog styled like CustomMessageBox.
-    Result: exec() returns button index; text property stores input.
-    """
+class CustomInputDialog:
+    """One line of text asked in a glass dialog (style book 5.13). exec() → 0 = OK, 1 = cancelled;
+    `text` holds what was typed."""
+
     def __init__(self, title, message, default_text="", parent=None, buttons=("OK", "Cancel"), default=0):
-        super().__init__(parent)
-        self.radius = 16
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
-        self.setFixedSize(420, 240)
-        self.result = None
+        self.title = title
+        self.message = message
         self.text = default_text
-        self.drag_pos = None
+        self.parent = parent
+        self.buttons = [str(b) for b in buttons]
+        self.result = None
 
-        # 关闭按钮
-        self.close_button = MacWindowButton("#FF605C", "x", self)
-        self.close_button.move(10, 10)
-        self.close_button.clicked.connect(self.reject)
-
-        layout = QVBoxLayout()
-        layout.setContentsMargins(32, 40, 32, 24)
-        layout.setSpacing(12)
-
-        title_lbl = QLabel(title)
-        title_lbl.setStyleSheet("font-size: 16px; font-weight: 600;")
-        layout.addWidget(title_lbl)
-
-        msg_lbl = QLabel(message)
-        msg_lbl.setWordWrap(True)
-        msg_lbl.setStyleSheet("font-size: 14px;")
-        layout.addWidget(msg_lbl)
-
-        self.line_edit = QLineEdit(default_text)
-        self.line_edit.setMinimumHeight(32)
-        self.line_edit.setStyleSheet("""
-            QLineEdit {
-                border: 1px solid #CCCCCC;
-                border-radius: 8px;
-                padding: 6px 10px;
-                font-size: 14px;
-            }
-            QLineEdit:focus {
-                border: 1.5px solid #0085FF;
-            }
-        """)
-        layout.addWidget(self.line_edit)
-
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-        self.btns = []
-        for i, btn_text in enumerate(buttons):
-            btn = WhiteButton(btn_text)
-            btn.setFixedWidth(150)
-            btn.clicked.connect(lambda checked, idx=i: self._on_btn(idx))
-            btn_layout.addWidget(btn)
-            self.btns.append(btn)
-        btn_layout.addStretch()
-        layout.addLayout(btn_layout)
-
-        self.setLayout(layout)
-        self.btns[default].setFocus()
-
-    def _on_btn(self, idx):
-        self.result = idx
-        self.text = self.line_edit.text()
-        self.done(idx)
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(self.rect())
-        path = QPainterPath()
-        path.addRoundedRect(rect, self.radius, self.radius)
-        painter.setClipPath(path)
-        if is_dark_theme(self):
-            painter.fillPath(path, QColor(30, 30, 30, 245))
-        else:
-            painter.fillPath(path, QColor(255, 255, 255, 245))
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            event.accept()
-
-    def mouseMoveEvent(self, event):
-        if event.buttons() == Qt.MouseButton.LeftButton and self.drag_pos is not None:
-            self.move(event.globalPosition().toPoint() - self.drag_pos)
-            event.accept()
-
-
-class GlassEffectWidget(QWidget):
-    def __init__(self, radius=36, bg_color=(255,255,255,20), highlight_color=(255,255,255,80), parent=None):
-        super().__init__(parent)
-        self.radius = radius
-        self.bg_color = QColor(*bg_color)
-        self.highlight_color = QColor(*highlight_color)
-        self.blur_bg = None
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(0, 0, self.width(), self.height()).adjusted(2, 2, -2, -2)
-        path = QPainterPath()
-        path.addRoundedRect(rect, self.radius, self.radius)
-        center_y = rect.center().y()
-
-        painter.setBrush(QBrush(self.bg_color))
-        painter.setPen(QPen(QColor(255, 255, 255, 50), 1))
-        painter.drawPath(path)
-
-        if self.blur_bg is None or self.blur_bg.size() != self.size():
-            tmp_img = QImage(self.size(), QImage.Format.Format_ARGB32)
-            tmp_img.fill(Qt.GlobalColor.transparent)
-            tmp_painter = QPainter(tmp_img)
-            tmp_painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            tmp_painter.setBrush(QBrush(QColor(255, 255, 255, 20)))
-            tmp_painter.setPen(QPen(QColor(255, 255, 255, 50), 1))
-            tmp_painter.drawPath(path)
-            tmp_painter.end()
-            pil_img = Image.fromqimage(tmp_img)
-            pil_img = pil_img.filter(ImageFilter.GaussianBlur(radius=2))
-            self.blur_bg = QImage(
-                pil_img.tobytes("raw", "RGBA"),
-                pil_img.width,
-                pil_img.height,
-                QImage.Format.Format_ARGB32
-            )
-        painter.drawImage(0, 0, self.blur_bg)
-
-        path = QPainterPath()
-        path.moveTo(rect.left()+self.radius, rect.bottom())
-        path.lineTo(rect.right()-self.radius, rect.bottom())
-        path.arcTo(rect.right() - 2 * self.radius, rect.bottom() - 2 * self.radius,
-                   2 * self.radius, 2 * self.radius, 270, 90)
-        path.lineTo(rect.right(), center_y)
-        path.lineTo(rect.left(), center_y)
-        path.arcTo(rect.left(), rect.bottom() - 2 * self.radius,
-                   2 * self.radius, 2 * self.radius, 180, 90)
-        path.closeSubpath()
-        gradient = QLinearGradient(rect.left(), rect.bottom(), rect.left(), center_y)
-        gradient.setColorAt(0, self.highlight_color)
-        gradient.setColorAt(1, QColor(255, 255, 255, 0))
-        painter.setPen(QPen(QBrush(gradient), 2))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawPath(path)
-
-class GlassButton(QPushButton):
-    def __init__(self, text="Glass Button", parent=None, on_double_click=None):
-        super().__init__(text, parent)
-        self.on_double_click = on_double_click
-
-        self.setStyleSheet("""
-            background-color: transparent;
-            border: none;
-            color: white;
-            font-size: 16px;
-            padding: 8px 24px;
-        """)
-
-    def mouseDoubleClickEvent(self, event):
-        if self.on_double_click:
-            self.on_double_click()
-        else:
-            pass
-            #print("GlassButton was double-clicked!")
-        super().mouseDoubleClickEvent(event)
-
-class GlassButtonWidget(QWidget):
-    def __init__(self, text, radius=36, bg_color=(255,255,255,20), highlight_color=(255,255,255,80), on_double_click=None):
-        super().__init__()
-        self.effect = GlassEffectWidget(radius, bg_color, highlight_color)
-        self.button = GlassButton(text, on_double_click=on_double_click)
-        self.button.setParent(self)
-        self.effect.setParent(self)
-        self.effect.lower()
-        self.button.raise_()
-        #self.button.setEnabled(False)
-        self.resize(200, 48)
-
-    def resizeEvent(self, event):
-        self.effect.resize(self.size())
-        self.button.resize(self.size())
+    def exec(self):
+        ok_text = self.buttons[0] if self.buttons else None
+        cancel_text = self.buttons[1] if len(self.buttons) > 1 else None
+        text, accepted = raspberry_ui.ask_text(self.parent, self.title, self.message, self.text,
+                                               ok_text=ok_text, cancel_text=cancel_text)
+        if accepted:
+            self.text = text
+        self.result = 0 if accepted else 1
+        return self.result
 
 
 class ClearCacheWorker(QThread):
@@ -2006,16 +1769,15 @@ class AppScanWorker(QThread):
 
     def run(self):  # 兼容版本
         sync_app_paths()
-        known_paths = set(load_app_paths())
-        app_dirs = ["/Applications", "/System/Applications",
-                    "/System/Volumes/Preboot/Cryptexes/App/System/Applications"]
+        known_paths = set(allowed_app_paths(load_app_paths()))
+        app_dirs = app_scan_dirs()
         display_name_map = load_display_name_map()
         alias_name_map = load_alias_name_map()
         display_dirty = False
         alias_dirty = False
         found_paths = set()
         new_apps = []
-        all_app_paths = find_top_level_apps(app_dirs)
+        all_app_paths = allowed_app_paths(find_top_level_apps(app_dirs))
         for app_path in all_app_paths:
             if not self._running:
                 return
@@ -2136,13 +1898,18 @@ class AppScanWorker(QThread):
         self._running = False
 
 class AppButton(QPushButton):
-    def __init__(self, app_info, parent=None, parent_group=None, main_window=None):
+    def __init__(self, app_info, parent=None, parent_group=None, main_window=None, cell=None):
         super().__init__(parent)
         self.app_info = app_info
         self.parent_group = parent_group
         self.main_window = main_window
+        cell = cell_size() if cell is None else int(cell)
+        side = icon_side(cell)
         self.setStyleSheet("background: transparent; border: none;")
-        self.setFixedSize(140, 140)
+        self.setFixedSize(cell, cell)
+        # macOS lays a push button out by a rectangle a few points off its own (differently for flat ones):
+        # rows with icons and rows of blanks then got different heights — use the widget's own rectangle
+        self.setAttribute(Qt.WidgetAttribute.WA_LayoutUsesWidgetRect, True)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -2150,8 +1917,8 @@ class AppButton(QPushButton):
 
         self.icon_label = QLabel()
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
-        self.icon_label.setFixedSize(100, 100)
-        pix = app_info['icon'].pixmap(100, 100)
+        self.icon_label.setFixedSize(side, side)
+        pix = app_info['icon'].pixmap(side, side)
         self.icon_label.setPixmap(pix)
         layout.addWidget(self.icon_label, alignment=Qt.AlignmentFlag.AlignHCenter)
 
@@ -2172,7 +1939,7 @@ class AppButton(QPushButton):
 
         name = app_info['name']
         font = self.text_label.font()
-        max_width = 130
+        max_width = cell - 10
         max_lines = 2
 
         display_text = multiline_elide_with_firstline(name, font, max_width, max_lines)
@@ -2256,51 +2023,19 @@ class AppButton(QPushButton):
         pm = self.app_info['icon'].pixmap(64, 64)
         drag.setPixmap(pm)
         # 触发拖拽（Move 意味着排序）
-        drag.exec(Qt.DropAction.MoveAction)
+        window = self.main_window
+        # in the main grid: the lists of groups come in at both sides for as long as the icon is held
+        rails = window is not None and self.parent_group is None and hasattr(window, 'show_drag_rails')
+        if rails:
+            window.show_drag_rails(self)
+        try:
+            drag.exec(Qt.DropAction.MoveAction)
+        finally:
+            if rails:
+                window.hide_drag_rails()
 
     def show_context_menu(self, pos):
         menu = QMenu(self)
-        light_menu_style = '''
-        QMenu {
-            background-color: #FFFFFF;
-            color: #222222;
-            border: 1px solid #CCCCCC;
-            border-radius: 12px;
-            padding: 4px;
-        }
-        QMenu::item {
-            padding: 8px 32px 8px 24px;
-            min-height: 15px;
-            border-radius: 6px;
-        }
-        QMenu::item:selected {
-            background-color: #0085FF;
-            color: #FFFFFF;
-        }
-        '''
-
-        dark_menu_style = '''
-        QMenu {
-            background-color: #232323;
-            color: #EEEEEE;
-            border: 1px solid #444444;
-            border-radius: 12px;
-            padding: 4px;
-        }
-        QMenu::item {
-            padding: 8px 32px 8px 24px;
-            min-height: 15px;
-            border-radius: 6px;
-        }
-        QMenu::item:selected {
-            background-color: #0085FF;
-            color: #FFFFFF;
-        }
-        '''
-        if is_dark_theme(self):
-            menu.setStyleSheet(dark_menu_style)
-        else:
-            menu.setStyleSheet(light_menu_style)
     #     menu.setStyleSheet('''
     #     QMenu {
     #     background-color: #FFFFFF;
@@ -2320,10 +2055,6 @@ class AppButton(QPushButton):
     # ''')
         if self.parent_group:
             move_menu = QMenu(self.tr("Move to another group"), self)
-            if is_dark_theme(self):
-                move_menu.setStyleSheet(dark_menu_style)
-            else:
-                move_menu.setStyleSheet(light_menu_style)
             # move_menu.setStyleSheet('''
             #     QMenu {
             #     background-color: #FFFFFF;
@@ -2341,7 +2072,7 @@ class AppButton(QPushButton):
             #     color: #FFFFFF;
             # }
             # ''')
-            for group in self.main_window.groups:
+            for group in self.main_window.groups_in_display_order():
                 if self.parent_group and group is self.parent_group:
                     continue
                 move_menu.addAction(group['name'], lambda g=group: self.main_window.move_app_to_group(self, g))
@@ -2349,13 +2080,9 @@ class AppButton(QPushButton):
             menu.addAction(self.tr("Put it back to the main interface"), self.move_out_of_group)
         if not self.parent_group:
             group_menu = QMenu(self.tr("Combine into a group"), self)
-            for group in self.main_window.groups:
+            for group in self.main_window.groups_in_display_order():
                 group_menu.addAction(group['name'], lambda g=group: self.main_window.combine_app_to_group(self, g))
             group_menu.addAction(self.tr("🆕 New group"), lambda: self.main_window.combine_app_to_group(self, None))
-            if is_dark_theme(self):
-                group_menu.setStyleSheet(dark_menu_style)
-            else:
-                group_menu.setStyleSheet(light_menu_style)
             # group_menu.setStyleSheet('''
             #         QMenu {
             #         background-color: #FFFFFF;
@@ -2374,12 +2101,18 @@ class AppButton(QPushButton):
             #     }
             #     ''')
             menu.addMenu(group_menu)
+        menu.addAction(self.tr("Hide in Raspberry"), self.hide_in_raspberry)
         menu.addAction(self.tr("Move to the trash can"), self.move_to_trash)
+        menu.setProperty('broccoliNativeMenu', True)  # the system's own menu (style book 5.5)
         menu.exec(self.mapToGlobal(pos))
 
     def move_out_of_group(self):
         if self.main_window and self.parent_group:
             self.main_window.move_app_out_of_group(self.app_info, self.parent_group)
+
+    def hide_in_raspberry(self):
+        if self.main_window:
+            self.main_window.hide_app(self.app_info)
 
     def move_to_trash(self):
         subprocess.Popen(
@@ -2389,22 +2122,85 @@ class AppButton(QPushButton):
         if self.main_window:
             self.main_window.remove_app(self.app_info)
 
+class GroupTile(QLabel):
+    """A group's icon in the grid (style book 5.13): a glass tile 80 × 80 (corner 18, an app icon's
+    shape) with up to 3 × 3 small icons on it. The glass lies under the Qt content and never shows
+    beyond the grid it slides in; without glass the tile paints a translucent square of the same shape."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._glass = None
+        self._glass_tried = False
+        self._opacity = 1.0
+        self._veil = 0.0
+        self._side = tile_side()
+        self._radius = tile_radius()
+
+    def tile_rect(self):
+        side = self._side
+        return QRectF((self.width() - side) / 2.0, (self.height() - side) / 2.0, side, side)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._glass_tried:
+            return
+        self._glass_tried = True
+        grid = self.parentWidget()
+        while grid is not None and not isinstance(grid, AppGridWidget):
+            grid = grid.parentWidget()
+        self._glass = raspberry_ui.under_glass(self, self._radius,
+                                               inset=(self.width() - self._side) / 2.0, clip=grid)
+        if self._glass is not None:
+            self._glass.set_opacity(self._opacity * (1.0 - self._veil))
+
+    def set_glass_opacity(self, value):
+        """The tile fades with its button (the entrance animation)."""
+        self._opacity = float(value)
+        if self._glass is not None:
+            self._glass.set_opacity(self._opacity * (1.0 - self._veil))
+
+    def set_veil(self, level):
+        """An open group blurs what is behind it: the sharp glass fades out as the blurred picture
+        (with this tile in it) fades in."""
+        self._veil = max(0.0, min(1.0, float(level)))
+        if self._glass is not None:
+            self._glass.set_opacity(self._opacity * (1.0 - self._veil))
+
+    def paintEvent(self, event):
+        if not raspberry_ui.glass_active(self):
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(QPen(QColor(255, 255, 255, 90), 1.0))
+            painter.setBrush(QColor(255, 255, 255, 40))
+            painter.drawRoundedRect(self.tile_rect().adjusted(0.5, 0.5, -0.5, -0.5), self._radius, self._radius)
+            painter.end()
+        super().paintEvent(event)
+
+
+GROUP_DRAG_PREFIX = 'raspberry-group:'     # what a dragged group carries (an app carries its path)
+
+
 class GroupButton(QPushButton):
     def __init__(self, group, parent=None, main_window=None):
         super().__init__(parent)
         self.group = group
         self.main_window = main_window
-        self.setFixedSize(140, 140)
+        cell = cell_size()
+        side = icon_side(cell)
+        self.setFixedSize(cell, cell)
+        # macOS lays a push button out by a rectangle a few points off its own (differently for flat ones):
+        # rows with icons and rows of blanks then got different heights — use the widget's own rectangle
+        self.setAttribute(Qt.WidgetAttribute.WA_LayoutUsesWidgetRect, True)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.setStyleSheet("background: transparent; border: none;")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
 
-        self.icon_label = QLabel()
+        self.icon_label = GroupTile()
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
-        self.icon_label.setFixedSize(100, 100)
-        pix = group['icon'].pixmap(80, 80)
+        self.icon_label.setFixedSize(side, side)
+        pix = group['icon'].pixmap(tile_side(cell), tile_side(cell))
         self.icon_label.setPixmap(pix)
         layout.addWidget(self.icon_label, alignment=Qt.AlignmentFlag.AlignHCenter)
 
@@ -2412,7 +2208,7 @@ class GroupButton(QPushButton):
 
         name = group['name']
         font = self.text_label.font()
-        max_width = 130
+        max_width = cell - 10
         max_lines = 2
 
         display_text = multiline_elide_with_firstline(name, font, max_width, max_lines)
@@ -2432,55 +2228,60 @@ class GroupButton(QPushButton):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
 
+    def bind_fade(self, effect):
+        """The glass tile follows the button's opacity effect."""
+        tile = self.icon_label
+        tile.set_glass_opacity(effect.opacity())
+        effect.opacityChanged.connect(tile.set_glass_opacity)
+
+    # A group's icon is sorted by dragging like an app's (Ryan 2026-11-18: 「drag drop 主界面的分组为什么
+    # 无法调整顺序」): held and moved a few points = a drag, let go where it was pressed = open the group.
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self.main_window.show_group_widget(self.group, group_btn=self)
-        else:
-            super().mousePressEvent(event)
+            self._press_pos = event.position()
+            self._dragging = False
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if getattr(self, '_press_pos', None) is not None and not self._dragging:
+            if (event.position() - self._press_pos).manhattanLength() > QApplication.startDragDistance():
+                self._dragging = True
+                self.startDrag()
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            pressed, dragged = getattr(self, '_press_pos', None), getattr(self, '_dragging', False)
+            self._press_pos = None
+            self._dragging = False
+            if pressed is not None and not dragged and self.main_window is not None:
+                self.main_window.show_group_widget(self.group, group_btn=self)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def startDrag(self):
+        window = self.main_window
+        if window is None or window._is_searching():
+            return
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setText(GROUP_DRAG_PREFIX + self.group['name'])
+        drag.setMimeData(mime)
+        drag.setPixmap(self.group['icon'].pixmap(64, 64))
+        window.show_drag_rails(self, dragging_group=True)
+        try:
+            drag.exec(Qt.DropAction.MoveAction)
+        finally:
+            self._press_pos = None
+            self._dragging = False
+            window.hide_drag_rails()
 
     def show_context_menu(self, pos):
         menu = QMenu(self)
-        light_menu_style = '''
-        QMenu {
-            background-color: #FFFFFF;
-            color: #222222;
-            border: 1px solid #CCCCCC;
-            border-radius: 12px;
-            padding: 4px;
-        }
-        QMenu::item {
-            padding: 8px 32px 8px 24px;
-            min-height: 15px;
-            border-radius: 6px;
-        }
-        QMenu::item:selected {
-            background-color: #0085FF;
-            color: #FFFFFF;
-        }
-        '''
-
-        dark_menu_style = '''
-        QMenu {
-            background-color: #232323;
-            color: #EEEEEE;
-            border: 1px solid #444444;
-            border-radius: 12px;
-            padding: 4px;
-        }
-        QMenu::item {
-            padding: 8px 32px 8px 24px;
-            min-height: 15px;
-            border-radius: 6px;
-        }
-        QMenu::item:selected {
-            background-color: #0085FF;
-            color: #FFFFFF;
-        }
-        '''
-        if is_dark_theme(self):
-            menu.setStyleSheet(dark_menu_style)
-        else:
-            menu.setStyleSheet(light_menu_style)
     #     menu.setStyleSheet('''
     #     QMenu {
     #     background-color: #FFFFFF;
@@ -2500,6 +2301,7 @@ class GroupButton(QPushButton):
     # ''')
         menu.addAction(self.tr("Rename"), self.rename_group)
         menu.addAction(self.tr("Dissolve this group"), self.disband_group)
+        menu.setProperty('broccoliNativeMenu', True)  # the system's own menu (style book 5.5)
         menu.exec(self.mapToGlobal(pos))
 
     def rename_group(self):
@@ -2703,89 +2505,21 @@ def draw_highlight_with_fade(painter, points, start_idx, end_idx, fade_len=10, b
 def create_group_icon(apps,
                      highlight1_start=0.02, highlight1_len=0.22,
                      highlight2_start=0.55, highlight2_len=0.22):
+    """The small icons of a group, up to 3 × 3, on a transparent square. The tile under them is system
+    glass (GroupTile, style book 5.13) — the painted translucent square and its two white highlight
+    strokes are gone."""
     size = 240
-    radius = 56
     icon_size = 56
     spacing = 8
     grid = 3
 
-    # 1. 玻璃背景
-    bg_img = QImage(size, size, QImage.Format.Format_ARGB32)
-    bg_img.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(bg_img)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    rect = QRectF(0, 0, size, size)
-    path = QPainterPath()
-    path.addRoundedRect(rect, radius, radius)
-    painter.setClipPath(path)
-    painter.fillPath(path, QColor(255, 255, 255, 40))
-    painter.end()
-    from PIL import Image, ImageFilter
-    pil_img = Image.fromqimage(bg_img)
-    pil_img = pil_img.filter(ImageFilter.GaussianBlur(radius=2))
-    bg_img_blur = QImage(pil_img.tobytes("raw", "RGBA"), pil_img.width, pil_img.height, QImage.Format.Format_ARGB32)
-
-    # 2. 画到 QPixmap
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-    painter.drawImage(0, 0, bg_img_blur)
 
-    # 3. 画圆角边框
-    # border_pen = QPen(QColor(200, 200, 200, 220), 3)
-    # painter.setPen(border_pen)
-    # painter.drawRoundedRect(rect.adjusted(1.5, 1.5, -1.5, -1.5), radius, radius)
-
-    # 4. 画高光（可自定义长度和位置）
-    points = rounded_rect_points(rect.adjusted(3, 3, -3, -3), radius-2, num_points=240)
-    total = len(points)
-
-    # 左上高光
-    draw_highlight_with_fade(painter, points, start_idx=2, end_idx=int(0.22 * total), fade_len=10, base_width=4,
-                             reverse=False)
-    # draw_highlight_with_fade(painter, points, start_idx, end_idx, fade_len=10, base_width=4, reverse=False)
-    # original:
-    # start_idx = int(highlight1_start * total)
-    # end_idx = int((highlight1_start + highlight1_len) * total)
-    # painter.save()
-    # grad = QLinearGradient(points[start_idx], points[end_idx])
-    # grad.setColorAt(0, QColor(255,255,255,160))
-    # grad.setColorAt(1, QColor(255,255,255,0))
-    # pen = QPen(QBrush(grad), 4, cap=Qt.PenCapStyle.RoundCap)
-    # painter.setPen(pen)
-    # highlight_path = QPainterPath()
-    # highlight_path.moveTo(points[start_idx])
-    # for pt in points[start_idx+1:end_idx]:
-    #     highlight_path.lineTo(pt)
-    # painter.drawPath(highlight_path)
-    # painter.restore()
-
-    # 右下高光
-
-    draw_highlight_with_fade(painter, points, start_idx=int(0.55 * total), end_idx=int(0.87 * total), fade_len=13,
-                             base_width=4, reverse=True)
-    # draw_highlight_with_fade(painter, points, start_idx2, end_idx2, fade_len=10, base_width=4, reverse=True)
-    # original:
-    # start_idx2 = int(highlight2_start * total)
-    # end_idx2 = int((highlight2_start + highlight2_len) * total)
-    # painter.save()
-    # grad2 = QLinearGradient(points[start_idx2], points[end_idx2])
-    # grad2.setColorAt(0, QColor(255,255,255,120))
-    # grad2.setColorAt(1, QColor(255,255,255,0))
-    # pen2 = QPen(QBrush(grad2), 4, cap=Qt.PenCapStyle.RoundCap)
-    # painter.setPen(pen2)
-    # highlight_path2 = QPainterPath()
-    # highlight_path2.moveTo(points[start_idx2])
-    # for pt in points[start_idx2+1:end_idx2]:
-    #     highlight_path2.lineTo(pt)
-    # painter.drawPath(highlight_path2)
-    # painter.restore()
-
-    # 5. 画3*3小icon（缩小并居中）
-    n = min(9, len(apps))
-    total_icons = min(n, 9)
+    total_icons = min(9, len(apps))
     start_x = (size - (icon_size * grid + spacing * (grid - 1))) // 2
     start_y = (size - (icon_size * grid + spacing * (grid - 1))) // 2
     for i in range(total_icons):
@@ -2800,6 +2534,507 @@ def create_group_icon(apps,
     return QIcon(pixmap)
 
 
+ENTRANCE_MS = 420      # the icons coming in when the launcher opens …
+ENTRANCE_SHIFT = 26    # … each from this far (at most) nearer the middle
+ENTRANCE_STAGGER = 0.22   # … the outermost starts after this share of the time
+RAIL_WIDTH = 72        # the lists at the two sides while an icon is dragged (DragRail)
+RAIL_ITEM_H = 80      # tile 44 + name, and the same 6.5 pt of highlight on all four sides of them
+RAIL_TILE = 44
+RAIL_PAD = 8
+RAIL_RADIUS = 16
+RAIL_MS = 220
+ICON_FLY_MS = 380      # an icon flying into / out of a group
+VANISH_MS = 260        # an icon that leaves for good (Trash, a dissolved group) shrinking away
+REFLOW_MS = 300        # the other icons closing up
+PAGE_GAP = 0           # the main grid spans the window: a page travels one whole screen, its own margins
+                       # (80 + 80) are the gap between two pages (Ryan 2026-11-16: 「页与页之间留的缝隙大一点」)
+PAGE_GAP_GROUP = 80    # the same inside a group's panel
+
+
+class DragRail(QWidget):
+    """While an app icon is dragged in the main grid, a list stands at each side of the screen, in the
+    margin beside the icons (Ryan 2026-11-16: 「在左侧显示所有的文件夹的 list，然后拖入对应的文件夹就
+    可以直接分组……也应该是液态玻璃的，你设计一下」): one strip of system glass (corner 16), in it the
+    groups one under the other — each its small tile and its name — and "new group" last. Dropping the
+    icon on one puts the app into that group; the grid itself stays for sorting. Too many to fit: the
+    list moves by itself while the icon is held near its top / bottom end."""
+
+    def __init__(self, launcher, side):
+        super().__init__(launcher)
+        self.launcher = launcher
+        self.side = side              # -1: left of the grid, +1: right
+        self.items = []               # {'kind': 'group', 'group': g} / {'kind': 'new'}
+        self._hover = -1
+        self._scroll = 0
+        self._alpha = 1.0
+        self._home = QPoint(0, 0)
+        self._showing = False
+        self.setAcceptDrops(True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(RAIL_MS)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.valueChanged.connect(self._on_slide)
+        self._anim.finished.connect(self._on_slide_finished)
+        self._scroll_timer = QTimer(self)
+        self._scroll_timer.setInterval(16)
+        self._scroll_timer.timeout.connect(self._auto_scroll)
+        self._scroll_dir = 0
+        self.hide()
+
+    # ── content ──
+    def set_items(self, items):
+        self.items = list(items)
+        self._hover = -1
+        self._scroll = 0
+        self.update()
+
+    def content_height(self) -> int:
+        return RAIL_PAD * 2 + len(self.items) * RAIL_ITEM_H
+
+    def max_scroll(self) -> int:
+        return max(0, self.content_height() - self.height())
+
+    def item_rect(self, index) -> QRect:
+        return QRect(0, RAIL_PAD + index * RAIL_ITEM_H - self._scroll, self.width(), RAIL_ITEM_H)
+
+    def item_at(self, pos) -> int:
+        index = (pos.y() + self._scroll - RAIL_PAD) // RAIL_ITEM_H
+        return int(index) if 0 <= index < len(self.items) and 0 <= pos.x() < self.width() else -1
+
+    def hover_index(self) -> int:
+        return self._hover
+
+    # ── coming / going ──
+    def place(self, home: QPoint, height: int):
+        self._home = QPoint(home)
+        self.setFixedSize(RAIL_WIDTH, max(RAIL_ITEM_H + RAIL_PAD * 2, int(height)))
+
+    def _away(self) -> QPoint:
+        return QPoint(self._home.x() + self.side * (RAIL_WIDTH + 24), self._home.y())
+
+    def slide_in(self):
+        self._showing = True
+        start = self._anim.currentValue() if self._anim.state() == QAbstractAnimation.State.Running else 0.0
+        self._anim.blockSignals(True)
+        self._anim.stop()
+        self._anim.setStartValue(float(start or 0.0))
+        self._anim.setEndValue(1.0)
+        self._anim.blockSignals(False)
+        self._on_slide(float(start or 0.0))
+        self.show()
+        self.raise_()
+        glass = raspberry_ui.under_glass(self, RAIL_RADIUS)
+        if glass is not None:
+            glass.set_opacity(self._alpha)
+        self._anim.start()
+
+    def slide_out(self):
+        if not self.isVisible():
+            return
+        self._showing = False
+        self._scroll_timer.stop()
+        self._hover = -1
+        self._anim.blockSignals(True)
+        self._anim.stop()
+        self._anim.setStartValue(float(self._alpha))
+        self._anim.setEndValue(0.0)
+        self._anim.blockSignals(False)
+        self._anim.start()
+
+    def _on_slide(self, value):
+        t = max(0.0, min(1.0, float(value)))
+        self._alpha = t
+        away = self._away()
+        self.move(int(round(away.x() + (self._home.x() - away.x()) * t)), self._home.y())
+        glass = getattr(self, '_broccoli_child_glass', None)
+        if glass is not None:
+            glass.set_opacity(t)
+        self.update()
+
+    def _on_slide_finished(self):
+        if not self._showing:
+            self.hide()
+
+    # ── the drag ──
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasText() and self._showing:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        pos = event.position().toPoint()
+        self._scroll_dir = 0
+        if self.max_scroll() > 0:
+            if pos.y() < 36 and self._scroll > 0:
+                self._scroll_dir = -1
+            elif pos.y() > self.height() - 36 and self._scroll < self.max_scroll():
+                self._scroll_dir = 1
+        if self._scroll_dir and not self._scroll_timer.isActive():
+            self._scroll_timer.start()
+        elif not self._scroll_dir:
+            self._scroll_timer.stop()
+        self._last_pos = pos
+        self._set_hover(self.item_at(pos))
+        if self._hover >= 0:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self._scroll_timer.stop()
+        self._set_hover(-1)
+        event.accept()
+
+    def dropEvent(self, event):
+        self._scroll_timer.stop()
+        pos = event.position().toPoint()
+        index = self.item_at(pos)
+        self._set_hover(-1)
+        if index < 0:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.launcher.rail_drop(self.items[index], event.mimeData().text(), self.mapTo(self.launcher, pos))
+
+    def _auto_scroll(self):
+        self._scroll = max(0, min(self.max_scroll(), self._scroll + self._scroll_dir * 8))
+        self._set_hover(self.item_at(getattr(self, '_last_pos', QPoint(-1, -1))))
+        self.update()
+        if self._scroll in (0, self.max_scroll()):
+            self._scroll_timer.stop()
+
+    def _set_hover(self, index):
+        if index != self._hover:
+            self._hover = index
+            self.update()
+
+    # ── looks ──
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.setOpacity(self._alpha)
+        palette = raspberry_ui.ui_palette()
+        dark = palette['dark']
+        whole = QRectF(self.rect())
+        shape = QPainterPath()
+        shape.addRoundedRect(whole, RAIL_RADIUS, RAIL_RADIUS)
+        if not raspberry_ui.glass_active(self):          # no system glass: the same shape, painted
+            painter.setPen(QPen(palette['border'], 1.0))
+            painter.setBrush(palette['capsule'])
+            painter.drawRoundedRect(whole.adjusted(0.5, 0.5, -0.5, -0.5), RAIL_RADIUS, RAIL_RADIUS)
+        painter.setClipPath(shape)
+        font = painter.font()
+        font.setPixelSize(10)
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        accent = raspberry_ui.accent_color()
+        for index, item in enumerate(self.items):
+            rect = self.item_rect(index)
+            if rect.bottom() < 0 or rect.top() > self.height():
+                continue
+            hot = index == self._hover
+            if hot:                                       # where the icon would go: the accent colour
+                wash = QColor(accent)
+                wash.setAlpha(60 if dark else 46)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(wash)
+                # as wide a band of it left and right of the tile as above it and under the name
+                painter.drawRoundedRect(QRectF(rect).adjusted(5, 1.5, -5, -4), 13, 13)
+            side = RAIL_TILE + (4 if hot else 0)
+            tile = QRectF(rect.left() + (rect.width() - side) / 2.0, rect.top() + 10 - (2 if hot else 0), side, side)
+            radius = side * 0.225
+            painter.setPen(QPen(accent, 1.5) if hot else QPen(QColor(255, 255, 255, 70 if dark else 110), 1.0))
+            painter.setBrush(QColor(255, 255, 255, 30 if dark else 62))
+            painter.drawRoundedRect(tile, radius, radius)
+            if item['kind'] == 'group':
+                pixmap = item['group']['icon'].pixmap(int(side * 2), int(side * 2))
+                painter.drawPixmap(tile.toRect(), pixmap)
+                name = item['group']['name']
+            elif item['kind'] == 'page':
+                number_font = QFont(font)
+                number_font.setPixelSize(20)
+                number_font.setBold(item['page'] == self.launcher.current_page)   # the page on screen: bold
+                painter.setFont(number_font)
+                painter.setPen(QColor(palette['text']))
+                painter.drawText(tile.toRect(), int(Qt.AlignmentFlag.AlignCenter), str(item['page'] + 1))
+                painter.setFont(font)
+                name = self.launcher.page_label(item['page'])
+            else:
+                pen = QPen(QColor(palette['text']), 2.0)
+                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                painter.setPen(pen)
+                c, arm = tile.center(), side * 0.2
+                painter.drawLine(QPointF(c.x() - arm, c.y()), QPointF(c.x() + arm, c.y()))
+                painter.drawLine(QPointF(c.x(), c.y() - arm), QPointF(c.x(), c.y() + arm))
+                name = self.launcher.new_group_label() if item['kind'] == 'new' else self.launcher.page_label()
+            painter.setPen(QColor(palette['text']))
+            text = metrics.elidedText(name, Qt.TextElideMode.ElideRight, self.width() - 14)
+            painter.drawText(QRect(rect.left() + 7, rect.top() + 10 + RAIL_TILE + 5, rect.width() - 14, 14),
+                             int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop), text)
+        # more above / below: the list fades out at that end
+        for more, top in ((self._scroll > 0, True), (self._scroll < self.max_scroll(), False)):
+            if more:
+                painter.setPen(QColor(palette['secondary']))
+                y = 6 if top else self.height() - 6
+                painter.drawText(QRect(0, y - 6, self.width(), 12), int(Qt.AlignmentFlag.AlignCenter), '⌃' if top else '⌄')
+        painter.end()
+
+
+class PageSlide(QObject):
+    """Turning a page the way the system's launcher does (Ryan 2026-11-16: 「整体向左移，右边新的页面
+    一起进来」): the page on screen and the page coming in are one strip. Both move together — under the
+    fingers, or on their own — and the page that comes in is made of the real buttons, which simply
+    stay when the strip stops (nothing is swapped at the end, so nothing jumps).
+
+    The host (the launcher / an open group) gives:
+      current_page, slide_page_count(), slide_duration(width), slide_gap(),
+      slide_start()            → the buttons of the page on screen (at their places),
+      slide_build(page)        → the buttons of another page, at their places, not shown yet,
+      slide_commit(page, btns) → that page is now the page on screen, made of these buttons."""
+
+    FOLLOW_RELEASE_MS = 300   # no more wheel events for this long = the fingers are off
+
+    def __init__(self, host, grid):
+        super().__init__(host)
+        self.host, self.grid = host, grid
+        self._old = []          # (button, home) of the page on screen
+        self._near = {}         # +1 (the page after) / -1 (the page before) → [(button, home)]
+        self._near_page = {}
+        self._offset = 0.0      # how far the strip is from rest; negative = moved left
+        self._accum = 0
+        self._width = 0
+        self._active = False
+        self._target = None     # (direction, page) while the strip runs to another page
+        self._anim = QVariantAnimation(self)
+        self._anim.valueChanged.connect(self._on_value)
+        self._anim.finished.connect(self._on_finished)
+        self._release = QTimer(self)
+        self._release.setSingleShot(True)
+        self._release.timeout.connect(self.release)
+
+    # ── state ──
+    def active(self) -> bool:
+        return self._active
+
+    def running(self) -> bool:
+        return self._anim.state() == QAbstractAnimation.State.Running
+
+    def offset(self) -> float:
+        return self._offset
+
+    def page_width(self) -> int:
+        return self._width or self.grid.width()
+
+    def incoming(self, direction):
+        return [button for button, _home in self._near.get(direction, ())]
+
+    @staticmethod
+    def _alive(button) -> bool:
+        return button is not None and not sip.isdeleted(button)
+
+    def _begin(self):
+        if self._active:
+            return
+        self._active = True
+        # one page = the grid's width + the gap the host wants between two pages
+        self._width = max(1, self.grid.width() + int(self.host.slide_gap()))
+        self._offset, self._accum = 0.0, 0
+        self._old = [(button, button.pos()) for button in self.host.slide_start() if self._alive(button)]
+
+    def _ensure(self, direction, page=None) -> bool:
+        """The page on that side exists as buttons (built the first time the strip moves that way)."""
+        if page is None:
+            page = self.host.current_page + direction
+        if direction in self._near:
+            if self._near_page.get(direction) == page:
+                return True
+            self._drop(direction)
+        if not 0 <= page < self.host.slide_page_count():
+            return False
+        buttons = [button for button in (self.host.slide_build(page) or []) if self._alive(button)]
+        if not buttons:
+            return False
+        items = [(button, button.pos()) for button in buttons]
+        shift = int(round(self._offset)) + direction * self._width
+        for button, home in items:
+            button.move(home.x() + shift, home.y())
+            button.show()
+        self._near[direction], self._near_page[direction] = items, page
+        return True
+
+    def _drop(self, direction):
+        for button, _home in self._near.pop(direction, ()):
+            if self._alive(button):
+                safe_delete_widget(button)
+        self._near_page.pop(direction, None)
+
+    def _place(self):
+        x = int(round(self._offset))
+        for button, home in self._old:
+            if self._alive(button):
+                button.move(home.x() + x, home.y())
+        for direction, items in self._near.items():
+            shift = x + direction * self._width
+            for button, home in items:
+                if self._alive(button):
+                    button.move(home.x() + shift, home.y())
+        # the system glass under the group tiles moves at once, what Qt draws only on its next turn:
+        # draw now, so that the two stay together
+        if self.grid.isVisible():
+            self.grid.repaint()
+
+    def _reset(self):
+        self._anim.stop()
+        self._release.stop()
+        for direction in list(self._near):
+            self._drop(direction)
+        self._old = []
+        self._offset, self._accum = 0.0, 0
+        self._active = False
+        self._target = None
+        self.host._is_animating = False
+
+    def abandon(self):
+        """The page is being laid out again by someone else: forget the strip (the buttons of the page
+        on screen are the caller's business, the ones coming in are removed)."""
+        if self._active or self._near or self.running():
+            self._reset()
+
+    # ── under the fingers ──
+    def wheel(self, dx, momentum=False):
+        if self._target is not None or self.running():
+            return
+        if not self._active and momentum:
+            return              # what is left of the last flick: not the start of a new drag
+        self._begin()
+        self._accum += int(dx)
+        direction = 1 if self._accum < 0 else -1
+        if abs(self._accum) >= self.grid.width() // 2:
+            # half a page: go on by itself (one page at a time); at the first / last page, back
+            self._release.stop()
+            self._offset = float(self._accum)
+            if not self._ensure(direction):
+                self._animate(0.0, 180, QEasingCurve.Type.OutCubic)
+            else:
+                remaining = abs(-direction * self._width - self._accum)
+                self._run(direction, min(240, 160 + int(min(remaining, self._width) * 0.25)))
+            return
+        if self._accum:
+            self._ensure(direction)
+        self._offset = float(self._accum)
+        self._place()
+        self._release.start(self.FOLLOW_RELEASE_MS)
+
+    def release(self):
+        """The fingers are off before half a page: back to where it was."""
+        if not self._active or self._target is not None or self.running():
+            return
+        self._animate(0.0, 200, QEasingCurve.Type.InBounce)
+
+    # ── on its own ──
+    def go(self, page, direction) -> bool:
+        """Slide to `page`, which comes in from the right (direction +1) or the left (-1)."""
+        if self._target is not None:
+            return False
+        self._anim.stop()
+        self._release.stop()
+        self._begin()
+        if not self._ensure(direction, page):
+            self._reset()
+            return False
+        self._run(direction, self.host.slide_duration(self._width))
+        return True
+
+    def _run(self, direction, duration):
+        self._target = (direction, self._near_page[direction])
+        self.host._is_animating = True
+        self._animate(float(-direction * self._width), duration, QEasingCurve.Type.OutCubic)
+
+    def _animate(self, end, duration, easing):
+        start = float(self._offset)
+        # (setting up an animation that has run before reports values of the old run: not ours)
+        self._anim.blockSignals(True)
+        self._anim.stop()
+        self._anim.setDuration(max(1, int(duration)))
+        self._anim.setEasingCurve(easing)
+        self._anim.setStartValue(start)
+        self._anim.setEndValue(float(end))
+        self._anim.setCurrentTime(0)
+        self._anim.blockSignals(False)
+        self._offset = start
+        self._anim.start()
+
+    def _on_value(self, value):
+        if not self._active:
+            return
+        self._offset = float(value)
+        self._place()
+
+    def _on_finished(self):
+        if not self._active:
+            return
+        target = self._target
+        if target is None:      # came back: the page on screen stays, the neighbours go
+            self._offset = 0.0
+            self._place()
+            self._reset()
+            return
+        direction, page = target
+        items = self._near.pop(direction, [])
+        self._near_page.pop(direction, None)
+        buttons = []
+        for button, home in items:
+            if self._alive(button):
+                button.move(home)
+                buttons.append(button)
+        self._reset()
+        self.host.slide_commit(page, buttons)
+
+
+GROUP_CHROME_LEVELS = (          # (above the title, the title, under the dots, at the sides)
+    (40, 100, 60, 60),            # roomy: as designed
+    (24, 64, 34, 44),
+    (12, 44, 18, 28),             # tight: small screens
+)
+GROUP_DOTS_ROOM = 40              # the page dots' row
+GROUP_CELL_MIN = 64
+
+
+def group_panel_fit(room_w, room_h, count, wanted_cell):
+    """How an open group is laid out in a room of room_w × room_h for `count` apps: the icons' cell,
+    the rows shown at once, and the panel's own measures. Tries, in this order, to keep: every row on
+    one page, the roomy title and edges, the launcher's icon size."""
+    wanted_rows = max(1, min((count + GRID_COLS - 1) // GRID_COLS, GRID_ROWS))
+
+    def cell_for(rows, level):
+        top, title, bottom, side = level
+        chrome = top + title + GROUP_DOTS_ROOM + bottom
+        by_height = (room_h - chrome) // rows - 10
+        by_width = int(((room_w - 2 * side) * CELL_FULL) // (GRID_COLS * 120 + (GRID_COLS - 1) * 32))
+        return min(int(wanted_cell), by_height, by_width), chrome
+
+    best = None
+    for rows in range(wanted_rows, 0, -1):
+        for level in GROUP_CHROME_LEVELS:
+            cell, chrome = cell_for(rows, level)
+            if cell >= GROUP_CELL_MIN:
+                # roomy measures only when they do not cost icon size
+                if best is None or cell > best['cell']:
+                    best = dict(rows=rows, cell=cell, chrome=chrome, top=level[0], title=level[1],
+                                bottom=level[2], side=level[3], wanted_rows=wanted_rows)
+                if cell >= int(wanted_cell):
+                    return best
+        if best is not None:
+            return best
+    level = GROUP_CHROME_LEVELS[-1]
+    cell, chrome = cell_for(1, level)
+    return dict(rows=1, cell=max(40, cell), chrome=chrome, top=level[0], title=level[1], bottom=level[2],
+                side=level[3], wanted_rows=wanted_rows)
+
+
 class GroupWidget(QWidget):
     closed = pyqtSignal()
     def __init__(self, group, parent=None, main_window=None, close_group_widget=None):
@@ -2809,27 +3044,39 @@ class GroupWidget(QWidget):
         self.close_group_widget = close_group_widget
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        screen = QGuiApplication.primaryScreen().geometry()
-        padding_lr = 60
-        apps_per_row = 7
-        btn_size = 120
-        spacing = 32
-        content_width = apps_per_row * btn_size + (apps_per_row - 1) * spacing
+        # The panel fits the room it has (Ryan 2026-11-16, like Broccoli's window: 「组的框框会太大然后
+        # 显示不全……希望能自动适配」): the window without the Dock / the menu bar. Its icons are the
+        # launcher's size when that fits; else, in this order: smaller icons, a tighter title and edges,
+        # fewer rows per page (the rest on further pages) — never a panel larger than the room.
+        if main_window is not None and hasattr(main_window, 'group_available_rect'):
+            room = main_window.group_available_rect().size()
+        else:
+            room = (main_window.size() if main_window is not None else QGuiApplication.primaryScreen().availableGeometry().size())
+        fit = group_panel_fit(room.width(), room.height(), len(group['apps']), cell_size())
+        apps_per_row = GRID_COLS
+        padding_lr = fit['side']
+        rows = fit['rows']
+        cell = fit['cell']
+        chrome_height = fit['chrome']
+        self._fit = fit
+        self._cell = cell
+        self._btn_pitch = int(round(152 * cell / float(CELL_FULL)))
+        self._row_height = cell + 10
+        row_height = self._row_height
+        content_width = (apps_per_row - 1) * self._btn_pitch + int(round(120 * cell / float(CELL_FULL)))
         group_width = content_width + 2 * padding_lr
-        group_width = min(group_width, int(screen.width() * 0.95))
-        apps_count = len(group['apps'])
-        max_rows = 5
-        row_height = 150
-        rows = min((apps_count + apps_per_row - 1) // apps_per_row, max_rows)
-        extra = 20  # 想再往下 20 像素
-        group_height = 100 + rows * row_height + 60 + 60 + extra
+        group_height = chrome_height + rows * row_height
+        self._full_size = QSize(group_width, group_height)
+        self._morph_t = 1.0
+        self._morph_picture = None
         self.setFixedSize(group_width, group_height)
-        self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(padding_lr-8, 40, padding_lr-8, 60)
+        self.layout = QVBoxLayout()
+        self.layout.setContentsMargins(padding_lr-8, fit['top'], padding_lr-8, fit['bottom'])
+        self.layout.setSpacing(0)
         self.name_label = QLabel(group['name'])
-        self.name_label.setFont(QFont("Arial", 20))
+        self.name_label.setFont(QFont("Arial", 20 if fit['title'] >= 64 else 16))
         self.name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.name_label.setFixedHeight(100)
+        self.name_label.setFixedHeight(fit['title'])
         self.name_label.setStyleSheet('''
             background-color: transparent;
             border: 0px;
@@ -2841,7 +3088,7 @@ class GroupWidget(QWidget):
             background-color: transparent;
             border: 0px;
         ''')
-        self.grid_widget.setMinimumHeight(5 * 150)
+        self.grid_widget.setMinimumHeight(rows * row_height)
         self.grid_widget.setMinimumWidth(content_width)
         self.layout.addWidget(self.grid_widget)
 
@@ -2849,7 +3096,7 @@ class GroupWidget(QWidget):
 
         self.page_indicator = QHBoxLayout()
         self.page_indicator.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.page_indicator.setSpacing(24)
+        self.page_indicator.setContentsMargins(0, 0, 0, 0)
 
         self.page_indicator_widget = QWidget()
         self.page_indicator_widget.setStyleSheet('''
@@ -2860,33 +3107,24 @@ class GroupWidget(QWidget):
         self.page_indicator_widget.setMaximumWidth(content_width)
         self.page_indicator_widget.setFixedHeight(40)
         self.page_indicator_widget.setMinimumWidth(60)
+        # the page dots: one glass capsule (style book 5.13)
+        self.dots = raspberry_ui.PageDots()
+        self.dots.set_max_width(content_width)
+        self.dots.pageClicked.connect(self.goto_page)
+        self.page_indicator.addWidget(self.dots)
         self.layout.addWidget(self.page_indicator_widget, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        w3 = GlassButtonWidget("", on_double_click=self.close_group_widget)
+        # the panel itself is drawn by this widget (paintEvent): system glass under it, or the frosted
+        # fallback; the content sits in a plain container
+        w3 = QWidget(self)
         w3.setLayout(self.layout)
-        # w3.setStyleSheet('''
-        #     background-color: #f0f0f0;
-        #     color: #333333;
-        #     border-radius: 36px;
-        # ''')
-        # w3.setStyleSheet('''
-        #     background: qlineargradient(
-        #         x1:0, y1:0, x2:0, y2:1,
-        #         stop:0 rgba(255,255,255,0.80),
-        #         stop:1 rgba(255,255,255,0.35)
-        #     );
-        #     border-radius: 36px;
-        #     border: 1.5px solid rgba(255,255,255,0.5);
-        #     box-shadow: 0 8px 32px 0 rgba(31,38,135,0.18);
-        #     backdrop-filter: blur(16px);
-        # ''')
-        layout = QVBoxLayout()
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(w3)
-        self.setLayout(layout)
+        w3.setGeometry(0, 0, group_width, group_height)  # no layout around it: the panel can be any size
+        self._content = w3                               # while it grows / shrinks (begin_morph)
+        self._panel_glass = None
+        self._frost = None
 
         self.current_page = 0
-        self.items_per_page = 35
+        self.items_per_page = GRID_COLS * (GRID_ROWS if fit['rows'] >= fit['wanted_rows'] else fit['rows'])
         self._mouse_press_pos = None
         self._mouse_move_pos = None
         self.display_apps(self.group['apps'], self.current_page)
@@ -2914,6 +3152,8 @@ class GroupWidget(QWidget):
         self._touchpad_swipe_anim = None
         self._touchpad_swipe_direction = None
         self._touchpad_swipe_timer = None
+        self._is_animating = False
+        self._page_slide = PageSlide(self, self.grid_widget)
 
         def _get_page_items():
             start = self.current_page * self.items_per_page
@@ -2938,96 +3178,202 @@ class GroupWidget(QWidget):
             enable_drag=True  # 组内允许拖拽
         )
 
-    def display_apps(self, apps, page=0):
-        # 安全清理布局和所有子控件，避免残留和重复删除
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        raspberry_ui.paint_folder_panel(self, painter, self._frost)
+        if self._morph_picture is not None:
+            # growing / shrinking: the content as one picture, scaled with the panel; it comes in after
+            # the panel has started to grow and is gone before it has shrunk into the tile
+            alpha = max(0.0, min(1.0, (self._morph_t - 0.25) / 0.6))
+            if alpha > 0.0:
+                painter.setOpacity(alpha)
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                painter.drawPixmap(self.rect(), self._morph_picture)
+        painter.end()
+
+    # ── growing out of the group's tile / shrinking back into it ──
+    def full_size(self) -> QSize:
+        return QSize(self._full_size)
+
+    def morph_radius(self) -> float:
+        """The corner now: the tile's at the start, the panel's when open."""
+        start = tile_radius()
+        return start + (raspberry_ui.PANEL_GLASS_RADIUS - start) * max(0.0, min(1.0, self._morph_t))
+
+    def begin_morph(self, progress):
+        """From now the panel may have any size: its content is shown as one scaled picture."""
+        full = self._full_size
+        self._content.setGeometry(0, 0, full.width(), full.height())
+        if self._content.layout() is not None:
+            self._content.layout().activate()
+        # the content alone on a clear background (grab() would paint the window's background under it)
+        ratio = max(1.0, float(self.devicePixelRatioF()))
+        picture = QPixmap(int(full.width() * ratio), int(full.height() * ratio))
+        picture.setDevicePixelRatio(ratio)
+        picture.fill(Qt.GlobalColor.transparent)
+        self._content.render(picture, QPoint(0, 0), QRegion(), QWidget.RenderFlag.DrawChildren)
+        self._morph_picture = picture
+        self._content.hide()
+        self.setMinimumSize(0, 0)
+        self.setMaximumSize(16777215, 16777215)
+        self._morph_t = float(progress)
+        self.update()
+
+    def set_morph(self, progress):
+        self._morph_t = max(0.0, min(1.0, float(progress)))
+        if self._panel_glass is not None:
+            self._panel_glass.set_progress(self._morph_t)
+        self.update()
+
+    def end_morph(self):
+        """Open: the real content takes over from its picture."""
+        self._morph_t = 1.0
+        self._morph_picture = None
+        if self._panel_glass is not None:
+            self._panel_glass.set_progress(1.0)
+        self.setFixedSize(self._full_size)
+        self._content.setGeometry(0, 0, self._full_size.width(), self._full_size.height())
+        self._content.show()
+        self.update()
+
+    def is_morphing(self) -> bool:
+        return self._morph_picture is not None
+
+    def attach_panel_glass(self):
+        """System glass under the panel, with the picture of the dimmed icons right under the glass
+        (style book 5.13). Without glass: the blurred picture of the icons for the painted panel."""
+        launcher = self.main_window
+        if self._panel_glass is not None or launcher is None:
+            return
+        sources = [launcher.main_content]
+        self._panel_glass = raspberry_ui.FolderPanelGlass(self, launcher, sources, picture=launcher.scrim.picture())
+        if not self._panel_glass.active():
+            self._frost = raspberry_ui.frosted_under(launcher, sources, launcher.group_panel_rect(self))
+
+    def refresh_panel_glass(self):
+        """The grid behind the panel was rebuilt: take its picture again, and keep the panel's glass
+        (and the glass of what is on the panel) above the glass of the new icons."""
+        if self._panel_glass is None or not self._panel_glass.active():
+            return
+        self._panel_glass.retake(picture=self.main_window.scrim.picture())
+        self._panel_glass.raise_views()
+        for child in self.findChildren(QWidget):
+            helper = getattr(child, '_broccoli_child_glass', None)
+            if helper is not None and hasattr(helper, 'raise_views'):
+                helper.raise_views()
+
+    def display_apps(self, apps, page=0, prebuilt=None):
+        """Lay the page out. `prebuilt`: the page's buttons already exist (they slid in): keep them."""
         grid_layout = self.grid_layout
         grid_widget = self.grid_widget
+        slide = getattr(self, '_page_slide', None)
+        if slide is not None and prebuilt is None:
+            slide.abandon()
+        keep = set(id(w) for w in (prebuilt or ()))
 
         # 先移除布局项
         for i in reversed(range(grid_layout.count())):
             w = grid_layout.itemAt(i).widget()
             try:
                 if w is not None:
+                    w.hide()            # first: else Qt's pending "show" makes it a window of its own
                     w.setParent(None)
                     w.deleteLater()
             except RuntimeError:
                 pass
 
         # 再保险：删除 grid_widget 下残留子控件，但跳过 overlay
-        for w in grid_widget.findChildren(QWidget):
-            if w is grid_widget:
+        for w in grid_widget.findChildren(QWidget, options=Qt.FindChildOption.FindDirectChildrenOnly):
+            if w.objectName() == "insertOverlay" or id(w) in keep:
                 continue
-            # 跳过 InsertCursorOverlay
-            if w.objectName() == "insertOverlay":
-                continue
-            # 某些情况下 isinstance 判断更直观：
-            # if isinstance(w, InsertCursorOverlay): continue
             try:
+                w.hide()            # first: else Qt's pending "show" makes it a window of its own
                 w.setParent(None)
                 w.deleteLater()
             except RuntimeError:
                 pass
-        apps_per_row = 7
-        btn_size = 120
-        row_height = 150
-        margin_x = 0
-        margin_y = 0
-        spacing = 32
-        start = page * self.items_per_page
-        end = start + self.items_per_page
-        page_items = apps[start:end]
-        for idx, app in enumerate(page_items):
-            row, col = divmod(idx, apps_per_row)
-            row_count = min(apps_per_row, len(page_items) - row * apps_per_row)
-            if row_count == apps_per_row:
-                x0 = margin_x
-            else:
-                x0 = margin_x
-            x = x0 + col * (btn_size + spacing)
-            y = margin_y + row * row_height
-            btn = AppButton(app, self, parent_group=self.group, main_window=self.main_window)
-            btn.setParent(self.grid_widget)
-            btn.move(x, y)
-            btn.show()
+        if prebuilt is None:
+            for btn in self._make_page_buttons(apps, page):
+                btn.show()
         self.update_page_indicator(len(apps))
 
         self.focus_index = -1
         self.focused_btn = None
 
-    def update_page_indicator(self, total_items):
-        while self.page_indicator.count():
-            item = self.page_indicator.takeAt(0)
-            widget = item.widget()
-            if widget:
-                widget.deleteLater()
-        total_pages = max(1, (total_items + self.items_per_page - 1) // self.items_per_page)
-        dot_width = 40
-        spacing = self.page_indicator.spacing()
-        total_width = total_pages * dot_width + (total_pages - 1) * spacing
-        self.page_indicator_widget.setFixedWidth(min(total_width, self.width() - 120))
-        for i in range(total_pages):
-            dot = QPushButton("●" if i == self.current_page else "○")
-            dot.setFixedSize(dot_width, dot_width)
-            if is_dark_theme(QApplication.instance()):
-                dot_color = "#CCCCCC"
-            else:
-                dot_color = "#666666"
-            dot.setStyleSheet(f"border:none; font-size:18px; color: {dot_color};")
-            # dot.setStyleSheet("border:none; font-size:18px; color: #666;")
-            dot.clicked.connect(lambda checked, idx=i: self.goto_page(idx))
-            self.page_indicator.addWidget(dot)
+    def display_apps_animated(self, apps, page):
+        """An icon left the group: the ones after it slide into the gap."""
+        before = {}
+        for button in self.grid_widget.findChildren(AppButton):
+            if button.isVisible():
+                before[button.app_info['path']] = button.pos()
+        page = max(0, min(page, (len(apps) - 1) // self.items_per_page if apps else 0))
+        self.current_page = page
+        self.display_apps(apps, page)
+        self._reflow = []
+        for button in self.grid_widget.findChildren(AppButton):
+            old = before.get(button.app_info['path'])
+            if old is None or old == button.pos():
+                continue
+            anim = QPropertyAnimation(button, b"pos", button)
+            anim.setDuration(REFLOW_MS)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            anim.setStartValue(old)
+            anim.setEndValue(button.pos())
+            button.move(old)
+            anim.start()
+            self._reflow.append(anim)
 
-    # def goto_page(self, page):
-    #     self.current_page = page
-    #     self.display_apps(self.group['apps'], self.current_page)
-    # gotoanimation
+    def _make_page_buttons(self, apps, page):
+        """The buttons of one page, each at its place in the grid (not shown yet)."""
+        apps_per_row = 7
+        start = page * self.items_per_page
+        buttons = []
+        for idx, app in enumerate(apps[start:start + self.items_per_page]):
+            row, col = divmod(idx, apps_per_row)
+            btn = AppButton(app, self, parent_group=self.group, main_window=self.main_window, cell=self._cell)
+            btn.setParent(self.grid_widget)
+            btn.move(col * self._btn_pitch, row * self._row_height)
+            buttons.append(btn)
+        return buttons
+
+    def update_page_indicator(self, total_items):
+        total_pages = max(1, (total_items + self.items_per_page - 1) // self.items_per_page)
+        self.dots.set_pages(total_pages, self.current_page)
+        self.page_indicator_widget.setFixedWidth(max(60, self.dots.width()))
+
     def goto_page(self, page):
-        total_pages = max(1, (len(self.group['apps']) + self.items_per_page - 1) // self.items_per_page)
+        total_pages = self.slide_page_count()
         if page < 0 or page >= total_pages or page == self.current_page:
             return
-        direction = "left" if page > self.current_page else "right"
-        self.animate_page_transition(page, direction)
+        if getattr(self, "_is_animating", False):
+            return
+        direction = 1 if page > self.current_page else -1
+        if not self.isVisible() or not self._page_slide.go(page, direction):
+            self.goto_page_immediate(page)
+            return
+        # as before, the page counts as turned from the start of the slide
         self.current_page = page
+        self.update_page_indicator(len(self.group['apps']))
+
+    # ── what the page strip (PageSlide) asks of this panel ──
+    def slide_page_count(self):
+        return max(1, (len(self.group['apps']) + self.items_per_page - 1) // self.items_per_page)
+
+    def slide_duration(self, width):
+        return max(160, min(300, int(width / 6000 * 1000)))
+
+    def slide_gap(self):
+        return PAGE_GAP_GROUP
+
+    def slide_start(self):
+        return [w for w in self.grid_widget.findChildren(AppButton)]
+
+    def slide_build(self, page):
+        return self._make_page_buttons(self.group['apps'], page)
+
+    def slide_commit(self, page, buttons):
+        self.current_page = page
+        self.display_apps(self.group['apps'], page, prebuilt=buttons)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -3075,6 +3421,8 @@ class GroupWidget(QWidget):
 
     def save_name(self):
         new_name = self.name_edit.text()
+        if self.main_window:
+            new_name = self.main_window.unique_group_name(new_name, self.group)
         self.group['name'] = new_name
         self.name_label.setText(new_name)
         self.name_label.show()
@@ -3121,7 +3469,7 @@ class GroupWidget(QWidget):
         #self.focused_btn.setStyleSheet(self.focused_btn.styleSheet() + "border: 2px solid #0085FF;")
         # 只给icon_label加边框
         self.focused_btn.icon_label.setStyleSheet(
-            "border: 1.5px solid #0085FF; border-radius: 24px; padding: 0px;"
+            raspberry_ui.focus_ring_qss()
         )
         self.setFocus()
 
@@ -3139,7 +3487,7 @@ class GroupWidget(QWidget):
         # self.focused_btn.setStyleSheet(self.focused_btn.styleSheet() + "border: 2px solid #0085FF;")
         # 只给icon_label加边框
         self.focused_btn.icon_label.setStyleSheet(
-            "border: 1.5px solid #0085FF; border-radius: 24px; padding: 0px;"
+            raspberry_ui.focus_ring_qss()
         )
         self.setFocus()
 
@@ -3156,7 +3504,7 @@ class GroupWidget(QWidget):
             self.focus_index = (self.focus_index - apps_per_row) % len(btns)
         self.focused_btn = btns[self.focus_index]
         self.focused_btn.icon_label.setStyleSheet(
-            "border: 1.5px solid #0085FF; border-radius: 24px; padding: 0px;"
+            raspberry_ui.focus_ring_qss()
         )
         self.setFocus()
 
@@ -3173,7 +3521,7 @@ class GroupWidget(QWidget):
             self.focus_index = (self.focus_index + apps_per_row) % len(btns)
         self.focused_btn = btns[self.focus_index]
         self.focused_btn.icon_label.setStyleSheet(
-            "border: 1.5px solid #0085FF; border-radius: 24px; padding: 0px;"
+            raspberry_ui.focus_ring_qss()
         )
         self.setFocus()
 
@@ -3331,119 +3679,13 @@ class GroupWidget(QWidget):
         dx = pixel_delta.x() if pixel_delta.x() != 0 else int(angle_delta.x() / 2)
 
         if dx != 0:
-            # 初始化触控板滑动会话
-            if not getattr(self, "_touchpad_swipe_active", False):
-                self._touchpad_swipe_active = True
-                self._touchpad_swipe_accum = 0
-                self._touchpad_swipe_btns = []
-                for w in self.grid_widget.findChildren(AppButton):
-                    self._touchpad_swipe_btns.append(w)
-                for btn in self._touchpad_swipe_btns:
-                    if sip.isdeleted(btn):
-                        continue
-                    btn._orig_pos = btn.pos()
-
-            # 累计位移
-            self._touchpad_swipe_accum += dx
-
-            page_w = self.grid_widget.width()
-            threshold = page_w // 2
-
-            # 实时越阈值：立刻触发（不等松手）
-            if abs(self._touchpad_swipe_accum) >= threshold:
-                direction = "left" if self._touchpad_swipe_accum < 0 else "right"
-                is_first_page = (self.current_page == 0)
-                total_pages = max(1, (len(self.group['apps']) + self.items_per_page - 1) // self.items_per_page)
-                is_last_page = (self.current_page == total_pages - 1)
-
-                # 首页右滑 / 末页左滑：四分之一页回弹
-                if (direction == "right" and is_first_page) or (direction == "left" and is_last_page):
-                    group = QParallelAnimationGroup(self)
-                    for btn in self._touchpad_swipe_btns:
-                        if sip.isdeleted(btn):
-                            continue
-                        orig = getattr(btn, "_orig_pos", btn.pos())
-                        anim = QPropertyAnimation(btn, b"pos", self)
-                        anim.setDuration(180)
-                        anim.setStartValue(btn.pos())
-                        anim.setEndValue(orig)
-                        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-                        group.addAnimation(anim)
-
-                    def after_bounce():
-                        self._touchpad_swipe_active = False
-                        self._touchpad_swipe_accum = 0
-                        self._touchpad_swipe_direction = None
-                        self._touchpad_swipe_btns = []
-
-                    if self._touchpad_swipe_timer and self._touchpad_swipe_timer.isActive():
-                        self._touchpad_swipe_timer.stop()
-                    group.finished.connect(after_bounce)
-                    group.start()
-                    self._touchpad_swipe_anim = group
-                    event.accept()
-                    return
-
-                # 正常翻页（每次只翻一页）
-                if direction == "left":
-                    target_page = min(self.current_page + 1, total_pages - 1)
-                    remaining = -page_w - self._touchpad_swipe_accum
-                else:
-                    target_page = max(self.current_page - 1, 0)
-                    remaining = page_w - self._touchpad_swipe_accum
-
-                self._is_animating = True
-                group = QParallelAnimationGroup(self)
-                for btn in self._touchpad_swipe_btns:
-                    if sip.isdeleted(btn):
-                        continue
-                    anim = QPropertyAnimation(btn, b"pos", self)
-                    duration = min(240, 160 + int(min(abs(remaining), page_w) * 0.25))
-                    anim.setDuration(duration)
-                    anim.setStartValue(btn.pos())
-                    anim.setEndValue(btn.pos() + QPoint(remaining, 0))
-                    anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-                    group.addAnimation(anim)
-
-                def after_swipe_out():
-                    self.goto_page_immediate(target_page)
-                    self._is_animating = False
-                    self._touchpad_swipe_active = False
-                    self._touchpad_swipe_accum = 0
-                    self._touchpad_swipe_direction = None
-                    self._touchpad_swipe_btns = []
-
-                if self._touchpad_swipe_timer and self._touchpad_swipe_timer.isActive():
-                    self._touchpad_swipe_timer.stop()
-                group.finished.connect(after_swipe_out)
-                group.start()
-                self._touchpad_swipe_anim = group
-                event.accept()
-                return
-
-            # 未越阈值：跟手移动
-            for btn in self._touchpad_swipe_btns:
-                if sip.isdeleted(btn):
-                    continue
-                orig = getattr(btn, "_orig_pos", btn.pos())
-                btn.move(orig + QPoint(self._touchpad_swipe_accum, 0))
-
-            self._touchpad_swipe_direction = "left" if self._touchpad_swipe_accum < 0 else "right"
-
-            # “松手回弹”的兜底计时器（若中断输入，仍能回弹）
-            if self._touchpad_swipe_timer and self._touchpad_swipe_timer.isActive():
-                self._touchpad_swipe_timer.stop()
-            else:
-                self._touchpad_swipe_timer = QTimer(self)
-                self._touchpad_swipe_timer.setSingleShot(True)
-                self._touchpad_swipe_timer.timeout.connect(self._on_touchpad_swipe_release)
-            self._touchpad_swipe_timer.start(300)
-
+            # the page on screen and the one coming in move together under the fingers (PageSlide)
+            self._page_slide.wheel(dx, event.phase() == Qt.ScrollPhase.ScrollMomentum)
             event.accept()
             return
 
         # 正在触控板滑动会话时，忽略垂直滚动，避免干扰
-        if getattr(self, "_touchpad_swipe_active", False):
+        if self._page_slide.active():
             event.accept()
             return
 
@@ -3479,6 +3721,7 @@ class GroupWidget(QWidget):
         self.group['apps'][idx], self.group['apps'][idx - 1] = self.group['apps'][idx - 1], self.group['apps'][idx]
         self.group['icon'] = create_group_icon(self.group['apps'])  # 立即刷新缩略图
         save_groups(self.main_window.groups)
+        self.main_window.refresh_group_tile(self.group)
         new_page = (idx - 1) // self.items_per_page
         self.current_page = new_page
         self.display_apps(self.group['apps'], self.current_page)
@@ -3498,6 +3741,7 @@ class GroupWidget(QWidget):
         self.group['apps'][idx], self.group['apps'][idx + 1] = self.group['apps'][idx + 1], self.group['apps'][idx]
         self.group['icon'] = create_group_icon(self.group['apps'])  # 立即刷新缩略图
         save_groups(self.main_window.groups)
+        self.main_window.refresh_group_tile(self.group)
         new_page = (idx + 1) // self.items_per_page
         self.current_page = new_page
         self.display_apps(self.group['apps'], self.current_page)
@@ -3512,56 +3756,10 @@ class GroupWidget(QWidget):
         if 0 <= rel_idx < len(btns):
             self.focused_btn = btns[rel_idx]
             self.focused_btn.icon_label.setStyleSheet(
-                "border: 1.5px solid #0085FF; border-radius: 24px; padding: 0px;"
+                raspberry_ui.focus_ring_qss()
             )
             self.focus_index = rel_idx
             self.setFocus()
-
-    def animate_page_transition(self, new_page, direction="left"):
-        if getattr(self, "_is_animating", False):
-            return
-        self._is_animating = True
-
-        grid = self.grid_widget
-        old_btns = [w for w in grid.findChildren(AppButton)]
-
-        if not old_btns:
-            self.display_apps(self.group['apps'], new_page)
-            self._is_animating = False
-            return
-
-        screen_width = self.width()
-        speed = 6000
-        anim_group_out = QParallelAnimationGroup(self)
-
-        for btn in old_btns:
-            if sip.isdeleted(btn):
-                continue
-            start_pos = btn.pos()
-            if direction == "left":
-                end_pos = QPoint(-btn.width(), start_pos.y())
-                distance = start_pos.x() + btn.width()
-            else:
-                end_pos = QPoint(screen_width + btn.width(), start_pos.y())
-                distance = screen_width - start_pos.x() + btn.width()
-            duration = max(80, int(distance / speed * 1000))
-            anim = QPropertyAnimation(btn, b"pos", self)
-            anim.setDuration(duration)
-            anim.setStartValue(start_pos)
-            anim.setEndValue(end_pos)
-            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-            anim_group_out.addAnimation(anim)
-
-        def cleanup_old_btns():
-            for btn in old_btns:
-                safe_delete_widget(btn)
-            # 真正换页
-            self.display_apps(self.group['apps'], new_page)
-            self._is_animating = False
-
-        anim_group_out.finished.connect(cleanup_old_btns)
-        anim_group_out.start()
-        self.anim = anim_group_out
 
     def on_drop_reorder_in_group(self, app_path: str, slot_index_on_page: int):
         # 找源 app
@@ -3594,110 +3792,6 @@ class GroupWidget(QWidget):
         # 主界面也需要刷新（因为组缩略图变了）
         self.main_window.display_apps(self.main_window.filtered_apps, self.main_window.current_page)
 
-    def _on_touchpad_swipe_release(self):
-        page_w = self.grid_widget.width()
-        threshold = page_w // 2
-        accum = self._touchpad_swipe_accum
-        direction = self._touchpad_swipe_direction
-        btns = self._touchpad_swipe_btns
-        total_pages = max(1, (len(self.group['apps']) + self.items_per_page - 1) // self.items_per_page)
-        is_first_page = self.current_page == 0
-        is_last_page = self.current_page == total_pages - 1
-
-        # 首页右滑
-        if is_first_page and accum > 0:
-            max_accum = page_w // 4
-            if accum > max_accum:
-                accum = max_accum
-            group = QParallelAnimationGroup(self)
-            for btn in btns:
-                if sip.isdeleted(btn):
-                    continue
-                orig = getattr(btn, "_orig_pos", btn.pos())
-                anim = QPropertyAnimation(btn, b"pos", self)
-                anim.setDuration(200)
-                anim.setStartValue(btn.pos())
-                anim.setEndValue(orig)
-                anim.setEasingCurve(QEasingCurve.Type.InBounce)
-                group.addAnimation(anim)
-            group.start()
-            self._touchpad_swipe_anim = group
-            self._touchpad_swipe_active = False
-            self._touchpad_swipe_accum = 0
-            self._touchpad_swipe_direction = None
-            self._touchpad_swipe_btns = []
-            return
-
-        # 末页左滑
-        if is_last_page and accum < 0:
-            min_accum = -page_w // 4
-            if accum < min_accum:
-                accum = min_accum
-            group = QParallelAnimationGroup(self)
-            for btn in btns:
-                if sip.isdeleted(btn):
-                    continue
-                orig = getattr(btn, "_orig_pos", btn.pos())
-                anim = QPropertyAnimation(btn, b"pos", self)
-                anim.setDuration(200)
-                anim.setStartValue(btn.pos())
-                anim.setEndValue(orig)
-                anim.setEasingCurve(QEasingCurve.Type.InBounce)
-                group.addAnimation(anim)
-            group.start()
-            self._touchpad_swipe_anim = group
-            self._touchpad_swipe_active = False
-            self._touchpad_swipe_accum = 0
-            self._touchpad_swipe_direction = None
-            self._touchpad_swipe_btns = []
-            return
-
-        # 正常回弹或翻页
-        if abs(accum) < threshold:
-            group = QParallelAnimationGroup(self)
-            for btn in btns:
-                if sip.isdeleted(btn):
-                    continue
-                orig = getattr(btn, "_orig_pos", btn.pos())
-                anim = QPropertyAnimation(btn, b"pos", self)
-                anim.setDuration(200)
-                anim.setStartValue(btn.pos())
-                anim.setEndValue(orig)
-                anim.setEasingCurve(QEasingCurve.Type.InBounce)
-                group.addAnimation(anim)
-            group.start()
-            self._touchpad_swipe_anim = group
-        else:
-            if direction == "left":
-                target_page = min(self.current_page + 1, total_pages - 1)
-                remaining = -page_w - accum
-            else:
-                target_page = max(self.current_page - 1, 0)
-                remaining = page_w - accum
-            group = QParallelAnimationGroup(self)
-            for btn in btns:
-                if sip.isdeleted(btn):
-                    continue
-                anim = QPropertyAnimation(btn, b"pos", self)
-                anim.setDuration(200)
-                anim.setStartValue(btn.pos())
-                anim.setEndValue(btn.pos() + QPoint(remaining, 0))
-                anim.setEasingCurve(QEasingCurve.Type.InBounce)
-                group.addAnimation(anim)
-
-            def on_anim_start():
-                self.goto_page_immediate(target_page)
-
-            group.stateChanged.connect(
-                lambda new, old: on_anim_start() if new == QAbstractAnimation.State.Running else None
-            )
-            group.start()
-            self._touchpad_swipe_anim = group
-        self._touchpad_swipe_active = False
-        self._touchpad_swipe_accum = 0
-        self._touchpad_swipe_direction = None
-        self._touchpad_swipe_btns = []
-
     def goto_page_immediate(self, page: int):
         total_pages = max(1, (len(self.group['apps']) + self.items_per_page - 1) // self.items_per_page)
         if page < 0 or page >= total_pages:
@@ -3706,47 +3800,24 @@ class GroupWidget(QWidget):
         self.display_apps(self.group['apps'], self.current_page)
 
 
-class Window(AcrylicWindow):
-    def __init__(self, parent=None):
-        super().__init__(parent=parent)
-        #self.setWindowTitle("Acrylic Window")
-        self.titleBar.raise_()
-
-        # customize acrylic effect
-        self.windowEffect.setAcrylicEffect(self.winId(), "F2F2F299")
-
-        # you can also enable mica effect on Win11
-        # self.windowEffect.setMicaEffect(self.winId(), isDarkMode=False, isAlt=False)
-
-        # 移除默认的右上角按钮
-        self.titleBar.minBtn.hide()
-        self.titleBar.maxBtn.hide()
-        self.titleBar.closeBtn.hide()
-
-        self.setSystemTitleBarButtonVisible(True)
-
-        # 设置圆角半径为20
-        self.set_rounded_corners(0)
-
-    def set_rounded_corners(self, radius):
-        """设置窗口圆角蒙版"""
-        path = QPainterPath()
-        rect = QRectF(0, 0, self.width(), self.height())
-        path.addRoundedRect(rect, radius, radius)
-        region = QRegion(path.toFillPolygon().toPolygon())
-        self.setMask(region)
-
-    def resizeEvent(self, event):
-        """窗口大小变化时，自动更新圆角蒙版"""
-        self.set_rounded_corners(0)
-        super().resizeEvent(event)
-
-
 class MainContentWidget(QWidget):
+    def set_content_margins(self, margins):
+        """(left, top, right, bottom) around the content. The grid itself spans the whole width of the
+        window — a page that is turned slides right to the edge of the screen before it is gone (Ryan
+        2026-11-16) — so the left / right margins are kept inside the grid (grid_side_insets)."""
+        left, top, right, bottom = [int(v) for v in margins]
+        self.side_margins = (left, right)
+        self.content_layout.setContentsMargins(0, top, 0, bottom)
+        grid_margins = self.grid_layout.contentsMargins()
+        self.grid_layout.setContentsMargins(left, grid_margins.top(), right, grid_margins.bottom())
+
+    def content_margins(self):
+        m = self.content_layout.contentsMargins()
+        return QMargins(self.side_margins[0], m.top(), self.side_margins[1], m.bottom())
+
     def __init__(self, parent, apps, groups, main_window):
         super().__init__(parent)
         self.setGeometry(parent.geometry())
-        self.setAutoFillBackground(True)
         self.search_bar = SearchLineEdit()
         self.search_bar.setPlaceholderText(self.tr("Search..."))
         self.search_bar.setFixedWidth(500)
@@ -3779,6 +3850,11 @@ class MainContentWidget(QWidget):
 
         self.grid_widget = AppGridWidget()
         self.grid_layout = QGridLayout(self.grid_widget)
+        # the five rows share the grid's height equally, whatever is in them (fit_cells / display_apps)
+        _gm = self.grid_layout.contentsMargins()
+        self.grid_layout.setContentsMargins(_gm.left(), 0, _gm.right(), 0)
+        self.grid_side_margin = max(_gm.left(), _gm.right())
+        self.grid_layout.setVerticalSpacing(0)
 
         self.page_indicator = QHBoxLayout()
         self.page_indicator.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -3787,10 +3863,19 @@ class MainContentWidget(QWidget):
         self.page_indicator_widget.setLayout(self.page_indicator)
         self.page_indicator_widget.setMaximumWidth(800)
         self.page_indicator_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        # the page dots: one glass capsule (style book 5.13)
+        self.dots = raspberry_ui.PageDots()
+        self.dots.set_max_width(760)
+        self.dots.pageClicked.connect(main_window.goto_page)
+        self.page_indicator.addWidget(self.dots)
 
-        w3 = Window()
+        # the launcher's backdrop (the blurred clean wallpaper) lies under everything; this is a plain,
+        # transparent container
+        w3 = QWidget()
         blay3 = QVBoxLayout()
-        blay3.setContentsMargins(80, 60, 80, 60)
+        self.content_layout = blay3  # the bottom / side margins follow the Dock (apply_dock_insets)
+        self.side_margins = (0, 0)
+        self.set_content_margins(raspberry_ui.content_margins((0, 0, 0)))
         blay3.addWidget(self.search_widget)
         blay3.addWidget(self.grid_widget)
         #blay3.addWidget(self.grid_widget, alignment=Qt.AlignmentFlag.AlignHCenter)
@@ -3811,15 +3896,12 @@ class MainContentWidget(QWidget):
         # 配置拖拽回调（主界面：包含 groups，且 clamp 到 apps 区域）
         def _get_page_items():
             # 与 LaunchpadWindow.display_apps 相同的来源
-            is_searching = bool(self.search_bar.text().strip())
-            if is_searching:
-                start = self.main_window.current_page * self.main_window.items_per_page
-                end = start + self.main_window.items_per_page
-                return [('app', a) for a in self.main_window.filtered_apps[start:end]]
-            else:
-                start = self.main_window.current_page * self.main_window.items_per_page
-                end = start + self.main_window.items_per_page
-                return self.main_window.main_order[start:end]
+            return self.main_window._page_items(self.main_window.current_page)
+
+        def _cell_rect(row, col):
+            item = self.grid_layout.itemAtPosition(row, col)
+            widget = item.widget() if item is not None else None
+            return QRect(widget.geometry()) if widget is not None else None
 
         def _on_drop_app(app_path: str, slot_index_on_page: int):
             self.main_window.on_drop_reorder_in_main(app_path, slot_index_on_page)
@@ -3834,7 +3916,8 @@ class MainContentWidget(QWidget):
             request_page_change=_request_page_change,
             accept_groups=True,
             clamp_to_app_zone=True,
-            enable_drag=False  # 禁用主界面拖拽
+            enable_drag=True,  # dropping an icon between two others sorts it there (Ryan 2026-11-16)
+            cell_rect=_cell_rect
         )
 
 
@@ -3847,7 +3930,6 @@ class LaunchpadWindow(QWidget):
         self.setGeometry(screen)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setStyleSheet("background: rgba(255,255,255,1); border-radius: 0px;")
         self.setWindowOpacity(1)
         self._mouse_press_pos = None
         self._mouse_move_pos = None
@@ -3858,6 +3940,18 @@ class LaunchpadWindow(QWidget):
         self.groups = load_groups(self.apps)
         self.current_page = 0
         self.items_per_page = 35
+        self._page_sizes = None
+        try:
+            with open(setting_path("independent_pages"), "r") as f:
+                self.independent_pages = f.read().strip() == "1"
+        except Exception:
+            self.independent_pages = False
+        try:
+            with open(PAGES_FILE, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            self._saved_pages = {k: v for k, v in loaded.items() if isinstance(v, int)} if isinstance(loaded, dict) else {}
+        except Exception:
+            self._saved_pages = {}
         #self.filtered_apps = [a for a in self.apps if not any(a in g['apps'] for g in self.groups)]
 
         # main_order
@@ -3890,6 +3984,28 @@ class LaunchpadWindow(QWidget):
 
         self.main_content = MainContentWidget(self, self.apps, self.groups, self)
         self.main_content.setGeometry(self.geometry())
+        # the backdrop: the blurred clean wallpaper (style book 5.13); the dimming behind an open group
+        self.backdrop = raspberry_ui.LauncherBackdrop(self)
+        self.backdrop.clean = self.read_clean_wallpaper_setting()
+        self.backdrop.changed.connect(self.update)
+        # the system menu bar is covered while the launcher is up (Ryan 2026-11-21: as the system's Launchpad)
+        self.menu_bar_cover = raspberry_ui.MenuBarCover(self, self.backdrop)
+        self.scrim = raspberry_ui.FolderScrim(self)
+        self.scrim.levelChanged.connect(self._veil_group_tiles)
+        self.scrim.levelChanged.connect(lambda _level: self.menu_bar_cover.set_dim(self.scrim.colour()))
+        QTimer.singleShot(1500, raspberry_ui.warm_panel_shadow)
+        raspberry_ui.on_theme(self._on_theme_changed)
+        # a Dock that is showing: the content keeps clear of it (Ryan 2026-11-16)
+        self._dock_insets = (0, 0, 0)
+        for _screen in QGuiApplication.screens():
+            _screen.availableGeometryChanged.connect(self._on_available_geometry_changed)
+        QGuiApplication.instance().screenAdded.connect(
+            lambda screen: screen.availableGeometryChanged.connect(self._on_available_geometry_changed))
+        # the wallpaper of the screen the mouse is on is fetched now, in the background: the first opening
+        # of the launcher does not wait for it
+        _start_screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        if _start_screen is not None:
+            self.backdrop.warm(_start_screen.geometry())
         #self.display_apps(self.filtered_apps, self.current_page)
 
         self.scan_timer = QTimer(self)
@@ -3948,6 +4064,33 @@ class LaunchpadWindow(QWidget):
         self.clear_search_on_close_action.triggered.connect(self.toggle_clear_search_on_close)
         self.menu.addAction(self.clear_search_on_close_action)
 
+        # the backdrop: only the wallpaper, or whatever is behind the window
+        self.clean_wallpaper_action = QAction(self.tr("🖼 Blur the wallpaper only"), self)
+        self.clean_wallpaper_action.setCheckable(True)
+        self.clean_wallpaper_action.setChecked(self.backdrop.clean)
+        self.clean_wallpaper_action.triggered.connect(self.toggle_clean_wallpaper)
+        self.menu.addAction(self.clean_wallpaper_action)
+
+        # apps in the user's own Applications folder (off unless switched on)
+        self.user_apps_action = QAction(self.tr("👤 Also show apps in my own Applications folder"), self)
+        self.user_apps_action.setCheckable(True)
+        self.user_apps_action.setChecked(user_apps_enabled())
+        self.user_apps_action.triggered.connect(self.toggle_user_apps)
+        self.menu.addAction(self.user_apps_action)
+
+        # every page keeps its own icons / one long row cut into pages
+        self.independent_pages_action = QAction(self.tr("📄 Keep every page on its own"), self)
+        self.independent_pages_action.setCheckable(True)
+        self.independent_pages_action.setChecked(self.independent_pages)
+        self.independent_pages_action.triggered.connect(self.toggle_independent_pages)
+        self.menu.addAction(self.independent_pages_action)
+
+        # the apps hidden from the launcher (right-click an app › Hide in Raspberry): show them again here
+        self.hidden_apps_menu = QMenu(self.tr("🙈 Hidden apps"), self)
+        self.hidden_apps_menu.aboutToShow.connect(self.fill_hidden_apps_menu)
+        self.menu.addMenu(self.hidden_apps_menu)
+        self.fill_hidden_apps_menu()
+
         self.menu.addSeparator()
 
         # 一键按字母排序未分组 App
@@ -3985,7 +4128,7 @@ class LaunchpadWindow(QWidget):
         self.menu.addAction(self.always_hide_dock_action)
         self.always_hide_dock_action.setCheckable(True)
         self.always_hide_dock_action.triggered.connect(self.always_hide_dock)
-        self._always_hide_dock_file = os.path.expanduser("~/.raspberry_hide_dock")
+        self._always_hide_dock_file = setting_path("hide_dock")
         self._always_hide_dock = self.read_always_hide_dock_setting()
         self.always_hide_dock_action.setChecked(self._always_hide_dock)
         # 新增 Show Dock 开关
@@ -3994,7 +4137,7 @@ class LaunchpadWindow(QWidget):
         self.show_dock_action.setChecked(False)  # 默认不勾选
         self.show_dock_action.triggered.connect(self.toggle_show_dock)
         self.menu.addAction(self.show_dock_action)
-        self._show_dock_file = os.path.expanduser("~/.raspberry_show_dock")
+        self._show_dock_file = setting_path("show_dock")
         self._force_show_dock = self.read_show_dock_setting()
         if self.read_show_dock_setting() == True:
             self.show_dock_action.setChecked(True)
@@ -4006,6 +4149,16 @@ class LaunchpadWindow(QWidget):
             self._always_hide_dock = False
             self.always_hide_dock_action.setChecked(False)
             self.write_always_hide_dock_setting(False)
+        # every Space (as Broccoli's "Show on all Spaces"; Ryan 2026-11-19)
+        self.all_spaces_action = QAction(self.tr("🖥 Show on all Spaces"), self)
+        self.all_spaces_action.setCheckable(True)
+        self._show_on_all_spaces = self.read_all_spaces_setting()
+        self.all_spaces_action.setChecked(self._show_on_all_spaces)
+        self.all_spaces_action.triggered.connect(self.toggle_show_on_all_spaces)
+        self.menu.addAction(self.all_spaces_action)
+        raspberry_ui.set_all_spaces(self._show_on_all_spaces)
+        # True while the marks are the ones put on before the Dock icon appeared (they reach full-screen Spaces)
+        self._spaces_marks_from_birth = False
         # login
         self.action10 = QAction(self.tr("🛠️ Start on login"))
         self.action10.setCheckable(True)
@@ -4032,11 +4185,6 @@ class LaunchpadWindow(QWidget):
         self.compact_mode_action.triggered.connect(self.toggle_compact_mode)
         self.menu.addAction(self.compact_mode_action)
 
-        self.auto_compact_mode_action = QAction(self.tr("🧠 Auto Compact Mode"), self)
-        self.auto_compact_mode_action.setCheckable(True)
-        self.auto_compact_mode_action.setChecked(self.read_auto_compact_mode_setting())
-        self.auto_compact_mode_action.triggered.connect(self.toggle_auto_compact_mode)
-        self.menu.addAction(self.auto_compact_mode_action)
 
         # 动画速度初始值
         self.page_anim_speed = self.read_anim_speed_setting()
@@ -4079,6 +4227,11 @@ class LaunchpadWindow(QWidget):
         self.restore_backup_action = QAction(self.tr("🔄 Restore backups"), self)
         self.menu.addAction(self.restore_backup_action)
         self.restore_backup_action.triggered.connect(self.restore_backup)
+        # Raspberry's tools in any other AI app that speaks MCP (2026-11-24): copies the setup lines
+        self.menu.addSeparator()
+        self.ai_apps_action = QAction(self.tr("🔌 Use in other AI apps…"), self)
+        self.menu.addAction(self.ai_apps_action)
+        self.ai_apps_action.triggered.connect(self.copy_ai_apps_setup)
 
         # 新增 About 菜单
         self.about_menu = self.menu_bar.addMenu(self.tr("Info"))
@@ -4111,14 +4264,13 @@ class LaunchpadWindow(QWidget):
 
         self.clear_cache_worker = None
 
-        # 你已有的 self.win_update = WindowUpdate()
-        #self.win_update = WindowUpdate()
-        # 启动自动更新线程（24h = 86400秒）
-        self.update_check_worker = UpdateCheckWorker(current_version='v' + VERSION, interval_seconds=86400)
-        self.update_check_worker.update_available.connect(self.on_update_available)  # 主线程槽
-        self.update_check_worker.checked_ok.connect(self.on_update_checked_ok)  # 可选：日志或无感刷新
-        self.update_check_worker.checked_error.connect(self.on_update_checked_error)  # 可选：日志
-        self.update_check_worker.start()
+        # a newer version? asked 3 s after the start and once a day (in a background thread); the update
+        # window comes up by itself when one is out, or when the last install left something to say
+        self.update_check_timer = QTimer(self)
+        self.update_check_timer.setInterval(86400 * 1000)
+        self.update_check_timer.timeout.connect(lambda: self.win_update.checkupdate(popup_when_ready=True))
+        self.update_check_timer.start()
+        QTimer.singleShot(3000, lambda: self.win_update.checkupdate(popup_when_ready=True))
 
         # 滑动翻页
         self._cooldown = False
@@ -4138,11 +4290,394 @@ class LaunchpadWindow(QWidget):
         self._touchpad_swipe_btns = []
         self._touchpad_swipe_anim = None
         self._is_animating = False
+        self._page_slide = PageSlide(self, self.main_content.grid_widget)
+        self._flyers = []     # icons on their way into / out of a group
+        self._drag_rails = []  # the lists at the two sides while an icon is dragged
+        self._entrance = None
+        self._reflow = []     # icons sliding to their new places
 
-        self._last_screen_width = None
-        self._last_screen_key = None
 
         self.setFocus()
+
+    # ── the backdrop, light / dark (style book 5.13) ──
+    def paint_backdrop(self, painter, rect):
+        self.backdrop.paint_fallback(painter, rect)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        self.paint_backdrop(painter, self.rect())
+        painter.end()
+
+    def read_clean_wallpaper_setting(self):
+        try:
+            with open(setting_path("clean_wallpaper"), "r") as f:
+                return f.read().strip() != "0"
+        except Exception:
+            return True
+
+    def write_clean_wallpaper_setting(self, enabled: bool):
+        try:
+            with open(setting_path("clean_wallpaper"), "w") as f:
+                f.write("1" if enabled else "0")
+        except Exception:
+            pass
+
+    def toggle_clean_wallpaper(self):
+        enabled = self.clean_wallpaper_action.isChecked()
+        self.write_clean_wallpaper_setting(enabled)
+        self.backdrop.clean = enabled
+        if self.isVisible():
+            self.backdrop.prepare(self.geometry())
+        else:
+            self.backdrop.set_clean(enabled)
+
+    # ── the user's own Applications folder ──
+    def toggle_user_apps(self):
+        enabled = self.user_apps_action.isChecked()
+        write_user_apps_enabled(enabled)
+        if enabled:
+            self.start_background_scan()      # finds them; on_new_apps_found puts them back in place
+        else:
+            self._remove_user_apps()
+
+    @staticmethod
+    def _load_user_app_places():
+        try:
+            with open(USER_APPS_MEMORY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _remove_user_apps(self):
+        """Switched off: the apps of ~/Applications leave the grid and the groups (their places are
+        written down, so that switching on again puts each one back)."""
+        self.take_out_apps([a for a in self.apps if is_user_app_path(a['path'])])
+
+    def take_out_apps(self, gone):
+        """Apps leave the launcher without being uninstalled (hidden by the user / their folder
+        switched off). Where each one was — its group, what stood before it — is written down first;
+        when it is found again (put_back_apps) it returns to that place."""
+        gone = [a for a in gone if a in self.apps]
+        if not gone:
+            return
+        places = self._load_user_app_places()
+        records = dict(places.get('apps') or {})
+        main_ids = [obj['name'] if typ == 'group' else obj['path'] for typ, obj in self.main_order]
+        for app_info in gone:
+            group = next((g for g in self.groups if app_info in g['apps']), None)
+            records[app_info['path']] = {
+                'group': group['name'] if group is not None else None,
+                'in_group': [a['path'] for a in group['apps']] if group is not None else [],
+                'main': main_ids,
+            }
+        try:
+            with open(USER_APPS_MEMORY_FILE, "w", encoding="utf-8") as f:
+                json.dump(dict(places, apps=records), f, ensure_ascii=False)
+        except Exception:
+            pass
+        gone_ids = set(id(a) for a in gone)
+        self.apps = [a for a in self.apps if id(a) not in gone_ids]
+        self.app_dict = {a['path']: a for a in self.apps}
+        for group in self.groups:
+            if any(id(a) in gone_ids for a in group['apps']):
+                group['apps'] = [a for a in group['apps'] if id(a) not in gone_ids]
+                group['icon'] = create_group_icon(group['apps'])
+        emptied = [g for g in self.groups if not g['apps']]
+        self.groups[:] = [g for g in self.groups if g['apps']]
+        self.main_order = [(typ, obj) for typ, obj in self.main_order
+                           if not (typ == 'app' and id(obj) in gone_ids) and not (typ == 'group' and any(obj is g for g in emptied))]
+        self.filtered_apps = [a for a in self.filtered_apps if id(a) not in gone_ids]
+        save_app_paths(allowed_app_paths(load_app_paths()))
+        if self.group_widget is not None and any(self.group_widget.group is g for g in emptied):
+            self.close_group_widget()
+        self.current_page = min(self.current_page, self.total_pages() - 1)
+        self.sync_group_order()
+        before = self._grid_snapshot() if self.isVisible() else None
+        self.display_apps(self.filtered_apps, self.current_page)
+        if before is not None:
+            self._animate_reflow(before)
+        if self.group_widget is not None:
+            self.group_widget.display_apps_animated(self.group_widget.group['apps'], self.group_widget.current_page)
+
+    @staticmethod
+    def _insert_after_neighbour(sequence, ids, item, item_id, remembered):
+        """Put `item` into `sequence` (whose ids are `ids`, same length) where the remembered order has
+        it: right after the nearest thing before it that is still there (at the front if none is)."""
+        try:
+            at = remembered.index(item_id)
+        except ValueError:
+            return False
+        for earlier in reversed(remembered[:at]):
+            if earlier in ids:
+                sequence.insert(ids.index(earlier) + 1, item)
+                return True
+        sequence.insert(0, item)
+        return True
+
+    def _restore_user_apps(self, new_apps):
+        self.put_back_apps(new_apps)
+
+    def put_back_apps(self, new_apps):
+        """Apps that were taken out and are found again: each to its remembered group and place (a
+        group that held nothing else and went with them comes back too). An app with nothing
+        remembered stays where a new app goes (the end)."""
+        places = self._load_user_app_places()
+        records = dict(places.get('apps') or {})
+        back = [a for a in new_apps if a['path'] in records]
+        if not back:
+            return
+        for app_info in back:
+            path = app_info['path']
+            record = records.pop(path)
+            remembered_main = list(record.get('main') or [])
+            group_name = record.get('group')
+            if group_name:
+                group = next((g for g in self.groups if g['name'] == group_name), None)
+                if group is None:
+                    group = {'name': group_name, 'apps': [], 'icon': create_group_icon([])}
+                    self.groups.append(group)
+                    ids = [obj['name'] if typ == 'group' else obj['path'] for typ, obj in self.main_order]
+                    if not self._insert_after_neighbour(self.main_order, ids, ('group', group), group_name, remembered_main):
+                        self.main_order.append(('group', group))
+                if app_info not in group['apps']:
+                    ids = [a['path'] for a in group['apps']]
+                    if not self._insert_after_neighbour(group['apps'], ids, app_info, path, list(record.get('in_group') or [])):
+                        group['apps'].append(app_info)
+                    group['icon'] = create_group_icon(group['apps'])
+                self.main_order = [(typ, obj) for typ, obj in self.main_order if not (typ == 'app' and obj is app_info)]
+                self.filtered_apps = [a for a in self.filtered_apps if a is not app_info]
+            elif path in remembered_main:
+                self.main_order = [(typ, obj) for typ, obj in self.main_order if not (typ == 'app' and obj is app_info)]
+                ids = [obj['name'] if typ == 'group' else obj['path'] for typ, obj in self.main_order]
+                self._insert_after_neighbour(self.main_order, ids, ('app', app_info), path, remembered_main)
+        self.group_dict = {g['name']: g for g in self.groups}
+        save_groups(self.groups)
+        try:
+            with open(USER_APPS_MEMORY_FILE, "w", encoding="utf-8") as f:
+                json.dump(dict(places, apps=records), f, ensure_ascii=False)
+        except Exception:
+            pass
+
+    # ── hidden apps (the blacklist) ──
+    def hide_app(self, app_info):
+        """This app is not shown in Raspberry any more (it stays installed). Undo: menu › Hidden apps."""
+        save_hidden_apps(load_hidden_apps() + [app_info['path']])
+        names = self._load_hidden_names()
+        names[app_info['path']] = app_info.get('name') or os.path.basename(app_info['path'])[:-4]
+        self._save_hidden_names(names)
+        self.take_out_apps([app_info])
+
+    def unhide_apps(self, paths=None):
+        """Show hidden apps again (all of them without `paths`): the next scan finds them and each
+        returns to where it was."""
+        hidden = load_hidden_apps()
+        back = set(hidden if paths is None else paths)
+        save_hidden_apps([p for p in hidden if p not in back])
+        self._save_hidden_names({p: n for p, n in self._load_hidden_names().items() if p not in back})
+        self.start_background_scan()
+
+    def _load_hidden_names(self) -> dict:
+        data = self._load_user_app_places().get('hidden_names')
+        return dict(data) if isinstance(data, dict) else {}
+
+    def _save_hidden_names(self, names):
+        places = self._load_user_app_places()
+        places['hidden_names'] = names
+        try:
+            with open(USER_APPS_MEMORY_FILE, "w", encoding="utf-8") as f:
+                json.dump(places, f, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def fill_hidden_apps_menu(self):
+        """Menu › Hidden apps: one line per hidden app (choosing it shows the app again), then "all"."""
+        menu = self.hidden_apps_menu
+        menu.clear()
+        hidden = load_hidden_apps()
+        names = self._load_hidden_names()
+        if not hidden:
+            nothing = menu.addAction(self.tr("No hidden apps"))
+            nothing.setEnabled(False)
+            return
+        for path in hidden:
+            label = names.get(path) or os.path.basename(path)[:-4]
+            menu.addAction(label, lambda p=path: self.unhide_apps([p]))
+        menu.addSeparator()
+        menu.addAction(self.tr("Show all of them again"), lambda: self.unhide_apps(None))
+
+    def _on_theme_changed(self, dark):
+        self.backdrop.retheme()
+        self.main_content.search_bar.apply_theme(dark)
+        for btn in self.findChildren(QPushButton):
+            if btn is getattr(self, 'focused_btn', None) and hasattr(btn, 'icon_label'):
+                btn.icon_label.setStyleSheet(raspberry_ui.focus_ring_qss())
+        self._refresh_group_glass()
+        self.update()
+
+    def group_available_rect(self) -> QRect:
+        """The part of the window an open group may use: not under the menu bar, not under a Dock
+        that is showing, and a little air to the edges."""
+        left, bottom, right = getattr(self, '_dock_insets', (0, 0, 0))
+        top = 0
+        try:
+            screen = self.screen() or QGuiApplication.primaryScreen()
+            top = max(0, screen.availableGeometry().top() - screen.geometry().top())
+        except Exception:
+            pass
+        air = 14
+        rect = self.rect().adjusted(left + air, top + air, -(right + air), -(bottom + air))
+        return rect if rect.width() > 200 and rect.height() > 200 else self.rect()
+
+    def group_panel_rect(self, panel):
+        """Where the open group ends up: the middle of the room it has."""
+        size = panel.full_size()
+        room = self.group_available_rect()
+        return QRect(room.x() + (room.width() - size.width()) // 2, room.y() + (room.height() - size.height()) // 2,
+                     size.width(), size.height())
+
+    def refit_group_panel(self):
+        """The room changed while a group is open (another screen size, the Dock came or went): the
+        panel is built again for the new room, at once, on the page it was on."""
+        panel = self.group_widget
+        if panel is None or not panel.isVisible() or getattr(self, '_closing', False):
+            return
+        room = self.group_available_rect().size()
+        fit = group_panel_fit(room.width(), room.height(), len(panel.group['apps']), cell_size())
+        centred = self.group_panel_rect(panel)
+        if all(fit[k] == panel._fit[k] for k in ('rows', 'cell', 'chrome', 'side')):
+            if not panel.is_morphing() and panel.geometry() != centred:
+                panel.setGeometry(centred)
+            return
+        group, first_shown = panel.group, panel.current_page * panel.items_per_page
+        self.show_group_widget(group)
+        if self.anim is not None:
+            self.anim.setCurrentTime(self.anim.duration())     # no growing again: it is simply there
+        panel = self.group_widget
+        if panel is not None:
+            panel.goto_page_immediate(min(first_shown // panel.items_per_page, panel.slide_page_count() - 1))
+
+    def _refresh_group_glass(self):
+        panel = self.group_widget
+        try:
+            if panel is not None and panel.isVisible():
+                self.scrim.set_picture(self._blurred_behind_group())
+                self._veil_group_tiles(self.scrim.level())
+                panel.refresh_panel_glass()
+        except RuntimeError:
+            pass
+
+    def _glass_behind_group(self):
+        """(widget, its glass) for every piece of glass under the content behind an open group: the
+        search capsule, the groups' tiles, the page dots."""
+        found = []
+        for widget in self.main_content.findChildren(QWidget):
+            helper = getattr(widget, '_broccoli_child_glass', None)
+            if helper is not None and hasattr(helper, 'set_opacity') and hasattr(helper, '_frame'):
+                found.append((widget, helper))
+        return found
+
+    def _blurred_behind_group(self):
+        """The blurred picture of the search, the icons and the dots (style book 5.13: an open group
+        blurs what is behind it). System glass is in no widget's picture: each piece goes in as a plate."""
+        plates = []
+        for widget, helper in self._glass_behind_group():
+            try:
+                if widget.isVisible():
+                    frame = helper._frame()
+                    plates.append((QRectF(frame.origin.x, frame.origin.y, frame.size.width, frame.size.height),
+                                   float(helper._current_radius())))
+            except Exception:
+                continue
+        return raspberry_ui.blurred_content(self, [self.main_content], plates)
+
+    def _veil_group_tiles(self, level):
+        """The sharp glass behind an open group fades out as its blurred picture fades in."""
+        for widget, helper in self._glass_behind_group():
+            try:
+                if isinstance(widget, GroupTile):
+                    widget.set_veil(level)
+                else:
+                    helper.set_opacity(1.0 - max(0.0, min(1.0, float(level))))
+            except Exception:
+                continue
+
+    # ── the Dock ──
+    def apply_dock_insets(self, insets=None, geometry=None):
+        """Keep the content (the page dots first of all) clear of a Dock that is showing: the margins
+        follow the Dock's size at this moment. `insets`: (left, bottom, right) when already known."""
+        if insets is None:
+            insets = raspberry_ui.dock_insets(geometry if geometry is not None else self.geometry())
+        insets = tuple(int(value) for value in insets)
+        if insets == self._dock_insets:
+            return False
+        sides_changed = (insets[0], insets[2]) != (self._dock_insets[0], self._dock_insets[2])
+        self._dock_insets = insets
+        layout = self.main_content.content_layout
+        self.main_content.set_content_margins(raspberry_ui.content_margins(insets))
+        layout.activate()
+        if self.isVisible():
+            # compact: its gap follows the grid's height, and its own side margins were just reset
+            if self.fit_cells() or sides_changed or getattr(self, 'compact_mode', False):
+                self._finish_reflow()        # an animation still running holds the buttons about to go
+                self.display_apps(self.filtered_apps, self.current_page)  # other cells / columns by width
+            elif self.group_widget is not None:
+                QTimer.singleShot(0, self._refresh_group_glass)
+            if self.group_widget is not None:
+                QTimer.singleShot(0, self.refit_group_panel)
+        return True
+
+    def fit_cells(self) -> bool:
+        """Set the icons' cell so that 7 columns × 5 rows fit between the search field and the page
+        dots on this screen (Ryan 2026-11-16: the icons must not push into each other). True = changed.
+        The room is what the layout really gives the grid, not an estimate."""
+        content = self.main_content
+        try:
+            if content.size() != self.size():
+                content.setGeometry(self.rect())
+            if content.layout() is not None:
+                content.layout().activate()
+            content.content_layout.activate()
+        except RuntimeError:
+            return False
+        grid = content.grid_widget
+        room_h = grid.height()
+        room_w = grid.width() - sum(content.side_margins) - 2 * content.grid_side_margin - (GRID_COLS - 1) * 10
+        if room_h < 5 * 40 or room_w < 7 * 40:   # not laid out yet: the next display fits it
+            return False
+        return set_cell_size(min(CELL_FULL, room_h // GRID_ROWS, room_w // GRID_COLS))
+
+    def _refit_after_layout(self):
+        """The layout settled after a display: if the room turned out different, lay the icons out again."""
+        if not self.isVisible():
+            return
+        changed = self.fit_cells()
+        if not changed and getattr(self, 'compact_mode', False):     # the compact gap follows the room too
+            grid = self.main_content.grid_widget
+            room = (max(0, grid.width() - sum(self.main_content.side_margins)), grid.height())
+            changed = room != getattr(self, '_compact_room', None)
+        if changed:
+            self.display_apps(self.filtered_apps, self.current_page)
+
+    @staticmethod
+    def compact_column_gap(avail_w, grid_h, cell=None) -> int:
+        """Compact mode's gap between two columns for a grid this wide (between its side margins) and
+        this high: the narrower of the usual gap between columns and the gap between rows; at least 10."""
+        cell = cell or cell_size()
+        # the layout shares what the icons leave free equally between them and at both ends:
+        # across, 10 between columns comes first (measured on a 2056 × 1329 screen: 117 and 59)
+        usual = (avail_w - GRID_COLS * cell - (GRID_COLS - 1) * 10) / float(GRID_COLS + 1) + 10
+        rows = (grid_h - GRID_ROWS * cell) / float(GRID_ROWS + 1)
+        if grid_h < GRID_ROWS * 40:                              # not laid out yet
+            rows = usual
+        return int(max(10, min(usual, rows)))
+
+    def _recheck_dock(self):
+        if self.isVisible():
+            self.apply_dock_insets()
+
+    def _on_available_geometry_changed(self, *_args):
+        QTimer.singleShot(0, self._recheck_dock)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -4221,39 +4756,182 @@ class LaunchpadWindow(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self.close_main_window()
 
+    # ── pages ──
+    # Two ways (menu › "Keep every page on its own", off by default — Ryan 2026-11-16):
+    #   off: one long row of icons cut into pages of 35; taking one away pulls everything after it up.
+    #   on:  every page keeps its own icons. Taking one away leaves that page one short, the other
+    #        pages do not move; a page that is full hands its last icon on to the next; an empty page
+    #        goes. Which page an icon is on is its '_page' (kept in pages.json by name / path).
+    def _is_searching(self) -> bool:
+        return bool(self.main_content.search_bar.text().strip())
+
+    def pages_are_separate(self) -> bool:
+        return bool(getattr(self, 'independent_pages', False))
+
+    @staticmethod
+    def _order_id(typ, obj):
+        return obj['name'] if typ == 'group' else obj['path']
+
+    def _normalise_pages(self):
+        """Bring main_order and the pages into line (separate pages only): every item has a page, the
+        items of a page stand together, no page holds more than 35, no page is empty."""
+        if not self.pages_are_separate():
+            self._page_sizes = None
+            return
+        per_page = self.items_per_page
+        saved = getattr(self, '_saved_pages', None) or {}
+        previous = 0
+        for typ, obj in self.main_order:
+            if not isinstance(obj.get('_page'), int):
+                known = saved.get(self._order_id(typ, obj))
+                # new here: the page it was saved on, else the page of what stands before it
+                obj['_page'] = int(known) if isinstance(known, int) else previous
+            previous = obj['_page']
+        pages = {}
+        for item in self.main_order:
+            pages.setdefault(item[1]['_page'], []).append(item)
+        ordered = [pages[number] for number in sorted(pages)]
+        index = 0
+        while index < len(ordered):                     # a full page hands its last icons on
+            if len(ordered[index]) > per_page:
+                spill = ordered[index][per_page:]
+                ordered[index] = ordered[index][:per_page]
+                if index + 1 < len(ordered):
+                    ordered[index + 1] = spill + ordered[index + 1]
+                else:
+                    ordered.append(spill)
+            index += 1
+        ordered = [page for page in ordered if page] or [[]]
+        self.main_order = []
+        for number, page in enumerate(ordered):
+            for typ, obj in page:
+                obj['_page'] = number
+                self.main_order.append((typ, obj))
+        self._page_sizes = [len(page) for page in ordered]
+
+    def _separate_now(self) -> bool:
+        return self.pages_are_separate() and not self._is_searching() and bool(getattr(self, '_page_sizes', None))
+
+    def page_start(self, page) -> int:
+        if self._separate_now():
+            return sum(self._page_sizes[:max(0, page)])
+        return page * self.items_per_page
+
+    def page_len(self, page) -> int:
+        if self._separate_now():
+            return self._page_sizes[page] if 0 <= page < len(self._page_sizes) else 0
+        total = len(self.filtered_apps) if self._is_searching() else len(self.main_order)
+        return max(0, min(self.items_per_page, total - page * self.items_per_page))
+
+    def page_of_index(self, index) -> int:
+        if self._separate_now():
+            running = 0
+            for number, size in enumerate(self._page_sizes):
+                running += size
+                if index < running:
+                    return number
+            return max(0, len(self._page_sizes) - 1)
+        return index // self.items_per_page
+
     def total_pages(self):
+        if self._separate_now():
+            return max(1, len(self._page_sizes))
         return max(1, (len(self.groups) + len(self.filtered_apps) + self.items_per_page - 1) // self.items_per_page)
 
-    def display_apps(self, apps, page=0):
+    def toggle_independent_pages(self):
+        on = self.independent_pages_action.isChecked()
+        self.independent_pages = on
+        try:
+            with open(setting_path("independent_pages"), "w") as f:
+                f.write("1" if on else "0")
+        except Exception:
+            pass
+        before = self._grid_snapshot() if self.isVisible() else None
+        if on:      # as it stands now: nothing moves
+            for index, (_typ, obj) in enumerate(self.main_order):
+                obj['_page'] = index // self.items_per_page
+        else:       # one long row again: everything closes up
+            for _typ, obj in self.main_order:
+                obj.pop('_page', None)
+        self._saved_pages = {}
+        self._normalise_pages()
+        self.current_page = min(self.current_page, self.total_pages() - 1)
+        self.save_current_order()
+        self.display_apps(self.filtered_apps, self.current_page)
+        if before is not None:
+            self._animate_reflow(before)
+
+    def move_app_to_page(self, app_info, page, kind='app'):
+        """Separate pages: the app goes to that page, in front of that page's other apps (after the
+        groups standing first there); a group (kind='group') to the same place = last of that page's
+        groups. `page` one past the last: a new page."""
+        if not self.pages_are_separate() or not any(obj is app_info for _t, obj in self.main_order):
+            return False
+        before = self._grid_snapshot() if self.isVisible() else None
+        self.main_order = [(typ, obj) for typ, obj in self.main_order if obj is not app_info]
+        page = max(0, min(int(page), len(self._page_sizes or [0])))
+        at = len(self.main_order)
+        for index, (typ, obj) in enumerate(self.main_order):
+            if obj.get('_page', 0) > page:
+                at = index
+                break
+            if obj.get('_page', 0) == page and typ == 'app':
+                at = index
+                break
+        app_info['_page'] = page
+        self.main_order.insert(at, (kind, app_info))
+        self._after_main_order_changed(before)
+        return True
+
+    def _after_main_order_changed(self, before=None):
+        """main_order was rearranged by hand: pages, the list of loose apps, the files, the screen."""
+        self._normalise_pages()
+        loose = [obj for typ, obj in self.main_order if typ == 'app']
+        self.filtered_apps = loose + [a for a in self.filtered_apps if not any(a is b for b in loose)]
+        self.current_page = min(self.current_page, self.total_pages() - 1)
+        self.sync_group_order()
+        self.display_apps(self.filtered_apps, self.current_page)
+        if before is not None:
+            self._animate_reflow(before)
+
+    def display_apps(self, apps, page=0, prebuilt=None):
+        """Lay the page out. `prebuilt`: the page's 35 buttons already exist (they slid in): keep them."""
         grid_layout = self.main_content.grid_layout
         grid_widget = self.main_content.grid_widget
+        slide = getattr(self, '_page_slide', None)
+        if slide is not None and prebuilt is None:
+            slide.abandon()
+        keep = set(id(w) for w in (prebuilt or ()))
 
         # 先移除布局项
         for i in reversed(range(grid_layout.count())):
             w = grid_layout.itemAt(i).widget()
             try:
                 if w is not None:
+                    w.hide()            # first: else Qt's pending "show" makes it a window of its own
                     w.setParent(None)
                     w.deleteLater()
             except RuntimeError:
                 pass
 
         # 再保险：删除 grid_widget 下残留子控件，但跳过 overlay
-        for w in grid_widget.findChildren(QWidget):
-            if w is grid_widget:
-                continue
-            if w.objectName() == "insertOverlay":
+        for w in grid_widget.findChildren(QWidget, options=Qt.FindChildOption.FindDirectChildrenOnly):
+            if w.objectName() == "insertOverlay" or id(w) in keep:
                 continue
             try:
+                w.hide()            # first: else Qt's pending "show" makes it a window of its own
                 w.setParent(None)
                 w.deleteLater()
             except RuntimeError:
                 pass
 
-        start = page * self.items_per_page
-        end = start + self.items_per_page
-
+        self._normalise_pages()
         is_searching = bool(self.main_content.search_bar.text().strip())
+        if not is_searching and page > self.total_pages() - 1:
+            page = self.current_page = self.total_pages() - 1
+        start = self.page_start(page)
+        end = start + (self.page_len(page) if self._separate_now() else self.items_per_page)
+
         if is_searching:
             page_items = [('app', app) for app in apps[start:end]]
         else:
@@ -4261,65 +4939,49 @@ class LaunchpadWindow(QWidget):
 
         # 常量
         MAX_COLS = 7
-        ICON_W = 140
         MAX_ROWS = 5
-        MIN_HGAP, MAX_HGAP = 10, ICON_W
-
-        n = min(len(page_items), MAX_COLS * MAX_ROWS)
-        used_cols = min(MAX_COLS, max(1, n))
+        # the cell that lets 7 × 5 fit this screen (smaller screens, a Dock in the way: smaller icons,
+        # never icons pushed into each other); every row and column the same size
+        if self.fit_cells() and prebuilt:
+            for w in prebuilt:      # made for another cell size: make them again
+                safe_delete_widget(w)
+            prebuilt = None
+        for _row in range(MAX_ROWS):
+            grid_layout.setRowMinimumHeight(_row, cell_size())
+            grid_layout.setRowStretch(_row, 1)
+        for _col in range(MAX_COLS):
+            grid_layout.setColumnMinimumWidth(_col, cell_size())
+            grid_layout.setColumnStretch(_col, 1)
         m = grid_layout.contentsMargins()
         top_m, bot_m = m.top(), m.bottom()
-        avail_w = max(0, grid_widget.width() - m.left() - m.right())
-
-        # 1) 基准 hgap：始终按“满一行”来计算（不会因为搜索变少而改变）
-        if MAX_COLS > 1:
-            possible_gap_full = max(MIN_HGAP, (avail_w - MAX_COLS * ICON_W) // (MAX_COLS - 1))
-            hgap_base = min(MAX_HGAP, possible_gap_full)
-        else:
-            hgap_base = MIN_HGAP
+        side_l, side_r = self.main_content.side_margins      # the grid spans the window: its own margins
+        avail_w = max(0, grid_widget.width() - side_l - side_r)
 
         if getattr(self, 'compact_mode', False):
-            hgap = hgap_base
+            # Compact (Ryan 2026-11-19: 「我的本意是让它取最窄的」; chosen: the gap between columns = the
+            # gap between rows): of the two gaps the icons have on this screen — left-right and
+            # up-down — the narrower one is used for both, and the icons stand as one block in the
+            # middle. Never wider than without it (the old rule, "at most 140", was wider on screens
+            # whose usual gap is smaller than that). Worked out from the screen in use, each time.
+            hgap = self.compact_column_gap(avail_w, grid_widget.height())
+            self._compact_room = (avail_w, grid_widget.height())
             content_w = MAX_COLS * ICON_W + (MAX_COLS - 1) * hgap
-            side_margin = max(0, (grid_widget.width() - content_w) // 2)
-            grid_layout.setContentsMargins(side_margin, top_m, side_margin, bot_m)
+            side_margin = max(0, (avail_w - content_w) // 2)
+            grid_layout.setContentsMargins(side_l + side_margin, top_m, side_r + side_margin, bot_m)
             grid_layout.setHorizontalSpacing(hgap)
-            # if is_searching and used_cols < MAX_COLS:
-            #     # 搜索且不满一行：靠左对齐 + 用满行的基准间距
-            #     hgap = hgap_base
-            #     grid_layout.setContentsMargins(0, top_m, 0, bot_m)
-            #     grid_layout.setHorizontalSpacing(hgap)
-            # else:
-            #     # 非搜索或满一行：内容居中
-            #     hgap = hgap_base
-            #     content_w = used_cols * ICON_W + (used_cols - 1) * hgap
-            #     side_margin = max(0, (grid_widget.width() - content_w) // 2)
-            #     grid_layout.setContentsMargins(side_margin, top_m, side_margin, bot_m)
-            #     grid_layout.setHorizontalSpacing(hgap)
         else:
             # 正常模式
             m = grid_layout.contentsMargins()
-            grid_layout.setContentsMargins(0, m.top(), 0, m.bottom())
-            grid_layout.setHorizontalSpacing(-1)
+            grid_layout.setContentsMargins(side_l, m.top(), side_r, m.bottom())
+            # a fixed gap: the system's own (-1) depends on what kind of button is next to which, so
+            # the columns sat up to 3 points differently from page to page — seen now that a page
+            # slides in and stays
+            grid_layout.setHorizontalSpacing(10)
 
-        # 摆放按钮
-        for idx, (typ, obj) in enumerate(page_items):
+        # 摆放按钮（不足的格子补空白按钮）
+        buttons = prebuilt if prebuilt else self._make_page_buttons(page_items)
+        for idx, btn in enumerate(buttons):
             row, col = divmod(idx, MAX_COLS)
-            if row >= MAX_ROWS:
-                break
-            if typ == 'group':
-                btn = GroupButton(obj, self.main_content.grid_widget, main_window=self)
-            else:
-                btn = AppButton(obj, self.main_content.grid_widget, main_window=self)
-            grid_layout.addWidget(btn, row, col)
-
-        # 补齐空白按钮
-        total = len(page_items)
-        for idx in range(total, MAX_COLS * MAX_ROWS):
-            row, col = divmod(idx, MAX_COLS)
-            if row >= MAX_ROWS:
-                break
-            btn = EmptyButton(main_window=self, parent=self.main_content.grid_widget)
             grid_layout.addWidget(btn, row, col)
 
         # 指示器数量
@@ -4329,48 +4991,89 @@ class LaunchpadWindow(QWidget):
             self.update_page_indicator(len(self.main_order))
         self.focus_index = -1
         self.focused_btn = None
+        QTimer.singleShot(0, self._refit_after_layout)
+        # an open group floats on this grid: its glass shows the new icons and stays above theirs
+        if self.group_widget is not None:
+            QTimer.singleShot(0, self._refresh_group_glass)
+
+    def _make_page_buttons(self, page_items):
+        """The 35 buttons of one page in slot order (icons, groups, then blanks); not in the layout yet."""
+        grid_widget = self.main_content.grid_widget
+        buttons = []
+        for typ, obj in page_items[:GRID_COLS * GRID_ROWS]:
+            if typ == 'group':
+                buttons.append(GroupButton(obj, grid_widget, main_window=self))
+            else:
+                buttons.append(AppButton(obj, grid_widget, main_window=self))
+        while len(buttons) < GRID_COLS * GRID_ROWS:
+            buttons.append(EmptyButton(main_window=self, parent=grid_widget))
+        return buttons
+
+    def _page_items(self, page):
+        start = self.page_start(page)
+        if self.main_content.search_bar.text().strip():
+            return [('app', app) for app in self.filtered_apps[start:start + self.items_per_page]]
+        if self._separate_now():
+            return self.main_order[start:start + self.page_len(page)]
+        return self.main_order[start:start + self.items_per_page]
 
     def update_page_indicator(self, total_items):
-        page_indicator = self.main_content.page_indicator
-        while page_indicator.count():
-            item = page_indicator.takeAt(0)
-            widget = item.widget()
-            if widget:
-                widget.deleteLater()
-        total_pages = self.total_pages()
-        for i in range(total_pages):
-            dot = QPushButton("●" if i == self.current_page else "○")
-            dot.setFixedSize(24, 24)
-            if is_dark_theme(QApplication.instance()):
-                dot_color = "#CCCCCC"
-            else:
-                dot_color = "#666666"
-            dot.setStyleSheet(f"border:none; font-size:18px; color: {dot_color};")
-            # dot.setStyleSheet("border:none; font-size:18px; color: #666;")
-            dot.clicked.connect(lambda checked, idx=i: self.goto_page(idx))
-            page_indicator.addWidget(dot)
+        self.main_content.dots.set_pages(self.total_pages(), self.current_page)
 
-    # def goto_page(self, page):
-    #     self.current_page = page
-    #     self.display_apps(self.filtered_apps, self.current_page)
-    # goto animation
     def goto_page(self, page):
         total_pages = self.total_pages()
         if page < 0 or page >= total_pages or page == self.current_page:
             return
-        direction = "left" if page > self.current_page else "right"
-        self.current_page = page
-        self.update_page_indicator(
-            len(self.main_order) if not self.main_content.search_bar.text().strip() else len(self.filtered_apps))
+        if getattr(self, "_is_animating", False):
+            return
+        direction = 1 if page > self.current_page else -1
         is_searching = bool(self.main_content.search_bar.text().strip())
-        if is_searching:  # remove animation when searching
-            # page_items = [('app', app) for app in
-            #               self.filtered_apps[page * self.items_per_page:(page + 1) * self.items_per_page]]
-            self.current_page = page
-            self.display_apps(self.filtered_apps, self.current_page)
-        else:
-            page_items = self.main_order[page * self.items_per_page:(page + 1) * self.items_per_page]
-            self.animate_page_transition(page_items, direction)
+        # (no animation when searching, as before)
+        if is_searching or not self.isVisible() or not self._page_slide.go(page, direction):
+            self.goto_page_immediate(page)
+            return
+        # as before, the page counts as turned (and the dots show it) from the start of the slide
+        self.current_page = page
+        self.main_content.dots.set_pages(total_pages, page)
+
+    # ── what the page strip (PageSlide) asks of the launcher ──
+    def slide_page_count(self):
+        return self.total_pages()
+
+    def slide_duration(self, width):
+        # the menu's "Flipping speed" (points per second) over one page
+        return max(140, min(400, int(width / max(1000, self.page_anim_speed) * 1000)))
+
+    def slide_gap(self):
+        return PAGE_GAP
+
+    def slide_start(self):
+        """The icons on screen; and where each of the 35 slots is, for the page that comes in."""
+        self._finish_reflow()
+        grid_layout = self.main_content.grid_layout
+        homes, moving = [], []
+        for idx in range(GRID_COLS * GRID_ROWS):
+            item = grid_layout.itemAtPosition(*divmod(idx, GRID_COLS))
+            w = item.widget() if item is not None else None
+            homes.append(w.pos() if w is not None else None)
+            if isinstance(w, (AppButton, GroupButton)):
+                moving.append(w)
+        self._slide_homes = homes
+        return moving
+
+    def slide_build(self, page):
+        homes = getattr(self, '_slide_homes', None) or []
+        page_items = self._page_items(page)
+        if not page_items or len(homes) < GRID_COLS * GRID_ROWS or any(home is None for home in homes):
+            return []
+        buttons = self._make_page_buttons(page_items)
+        for btn, home in zip(buttons, homes):
+            btn.move(home)
+        return buttons
+
+    def slide_commit(self, page, buttons):
+        self.current_page = page
+        self.display_apps(self.filtered_apps, page, prebuilt=buttons)
 
     def filter_apps(self, text):
         if not text.strip():
@@ -4390,14 +5093,292 @@ class LaunchpadWindow(QWidget):
         self.current_page = 0
         self.display_apps(self.filtered_apps, self.current_page)
 
-    def combine_app_to_group(self, app_btn, group):
+    # ── an icon goes into a group / comes out of one: it flies there, the others close up ──
+    @staticmethod
+    def _reflow_key(button):
+        if isinstance(button, GroupButton):
+            return ('group', id(button.group))
+        if isinstance(button, AppButton):
+            return ('app', button.app_info['path'])
+        return None
+
+    def _grid_snapshot(self):
+        """Where every icon of the page is now (before the grid is laid out again)."""
+        self._finish_reflow()
+        places = {}
+        for button in self.main_content.grid_widget.findChildren(QPushButton, options=Qt.FindChildOption.FindDirectChildrenOnly):
+            key = self._reflow_key(button)
+            if key is not None and button.isVisible():
+                places[key] = button.pos()
+        return places
+
+    def _settle_grid(self):
+        """The grid was just laid out again: put every icon at its final place now (the layout leaves
+        out what is not shown yet, and new buttons are only shown on Qt's next turn)."""
+        grid = self.main_content.grid_widget
+        if not grid.isVisible():
+            return
+        for button in grid.findChildren(QPushButton, options=Qt.FindChildOption.FindDirectChildrenOnly):
+            if not button.isVisible():
+                button.show()
+        self.main_content.grid_layout.activate()
+        for button in grid.findChildren(QPushButton, options=Qt.FindChildOption.FindDirectChildrenOnly):
+            if button.layout() is not None:
+                button.layout().activate()
+
+    def _animate_reflow(self, before, fade_new=True):
+        """The grid was laid out again: every icon that was on the page before slides from its old
+        place to its new one (instead of jumping)."""
+        self._finish_reflow()
+        grid = self.main_content.grid_widget
+        self._settle_grid()
+        moving = []
+        for button in grid.findChildren(QPushButton, options=Qt.FindChildOption.FindDirectChildrenOnly):
+            key = self._reflow_key(button)
+            old = before.get(key)
+            if old is None and key is not None and fade_new:
+                # it was not on the page before (it came out of a group, a new group …): it fades in
+                effect = QGraphicsOpacityEffect(button)
+                effect.setOpacity(0.0)
+                button.setGraphicsEffect(effect)
+                if isinstance(button, GroupButton):
+                    button.bind_fade(effect)
+                fade = QPropertyAnimation(effect, b"opacity", button)
+                fade.setDuration(REFLOW_MS)
+                fade.setStartValue(0.0)
+                fade.setEndValue(1.0)
+
+                def shown(button=button, effect=effect):
+                    try:
+                        if not sip.isdeleted(button) and button.graphicsEffect() is effect:
+                            if isinstance(button, GroupButton):
+                                button.icon_label.set_glass_opacity(1.0)
+                            button.setGraphicsEffect(None)
+                    except RuntimeError:
+                        pass
+
+                fade.finished.connect(shown)
+                moving.append(fade)
+                continue
+            if old is None or old == button.pos():
+                continue
+            anim = QPropertyAnimation(button, b"pos", button)
+            anim.setDuration(REFLOW_MS)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            anim.setStartValue(old)
+            anim.setEndValue(button.pos())
+            button.move(old)
+            moving.append(anim)
+        self._reflow = moving
+        if moving:
+            # the glass under the group tiles moves at once, Qt draws on its next turn: draw with it
+            moving[0].valueChanged.connect(lambda _value, grid=grid: grid.repaint() if not sip.isdeleted(grid) else None)
+        for anim in moving:
+            anim.start()
+
+    def _finish_reflow(self):
+        entrance = getattr(self, '_entrance', None)
+        if entrance is not None:
+            self._entrance = None
+            try:
+                if not sip.isdeleted(entrance) and entrance.state() == QAbstractAnimation.State.Running:
+                    entrance.setCurrentTime(entrance.totalDuration())
+            except RuntimeError:
+                pass
+        for anim in getattr(self, '_reflow', None) or []:
+            try:
+                if not sip.isdeleted(anim) and anim.state() == QAbstractAnimation.State.Running:
+                    anim.setCurrentTime(anim.duration())
+                    anim.stop()
+                    anim.finished.emit()
+            except RuntimeError:
+                pass
+        self._reflow = []
+
+    def _icon_rect(self, button):
+        """The icon of a button, in this window."""
+        try:
+            label = button.icon_label
+            if isinstance(label, GroupTile):
+                tile = label.tile_rect().toRect()
+                return QRect(label.mapTo(self, tile.topLeft()), tile.size())
+            return QRect(label.mapTo(self, QPoint(0, 0)), label.size())
+        except (RuntimeError, AttributeError):
+            return None
+
+    def _app_button(self, app_info, in_panel):
+        if in_panel and (self.group_widget is None or not self.group_widget.isVisible()):
+            return None
+        holder = self.group_widget.grid_widget if in_panel else self.main_content.grid_widget
+        for button in holder.findChildren(AppButton):
+            try:
+                if button.app_info is app_info:      # (just laid out: not shown yet, but in place)
+                    return button
+            except RuntimeError:
+                continue
+        return None
+
+    def _side_of_page(self, typ, obj):
+        """-1 / +1: the page this item is on lies before / after the page on screen (0: on it or nowhere)."""
+        for idx, (kind, item) in enumerate(self.main_order):
+            if kind == typ and item is obj:
+                page = self.page_of_index(idx)
+                return (page > self.current_page) - (page < self.current_page)
+        return 0
+
+    def _group_landing(self, group):
+        """(rect, lands_on_its_place): where an icon that goes into this group ends — its own small
+        place on the group's tile; a tile with more than nine shows no more: the middle of the tile."""
+        for button in self.main_content.grid_widget.findChildren(GroupButton):
+            try:
+                if button.group is group:
+                    tile = self._icon_rect(button)
+                    scale = tile.width() / 240.0            # create_group_icon draws on 240 × 240
+                    index = len(group['apps']) - 1
+                    if 0 <= index < 9:
+                        row, col = divmod(index, 3)
+                        return QRect(int(tile.x() + (28 + col * 64) * scale), int(tile.y() + (28 + row * 64) * scale),
+                                     max(1, int(56 * scale)), max(1, int(56 * scale))), True
+                    side = max(1, int(56 * scale))
+                    return QRect(tile.center().x() - side // 2, tile.center().y() - side // 2, side, side), False
+            except RuntimeError:
+                continue
+        return None, False
+
+    def _vanish_icon(self, icon, rect):
+        """Something leaves for good (to the Trash, a group dissolved): its picture shrinks a little
+        where it stood and fades away."""
+        if rect is None:
+            return None
+        w, h = int(rect.width() * 0.7), int(rect.height() * 0.7)
+        end = QRect(rect.center().x() - w // 2, rect.center().y() - h // 2, w, h)
+        return self._fly_icon({'icon': icon}, rect, end, fade=True, duration=VANISH_MS)
+
+    def _fly_icon(self, app_info, start, end, fade, side=0, duration=None):
+        """The app's icon flies from `start` to `end` (rectangles in this window), changing size on the
+        way. `fade`: it melts away as it arrives (it lands behind the blur, or on a page that is not on
+        screen: `end` None and `side` -1 / +1 = towards that edge)."""
+        if start is None or not self.isVisible():
+            return None
+        if end is None:
+            half = max(8, start.width() // 2)
+            x = -half if side < 0 else (self.width() if side > 0 else start.center().x() - half // 2)
+            end, fade = QRect(x, start.center().y() - half // 2, half, half), True
+        flyer = QLabel(self)
+        flyer.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        flyer.setStyleSheet("background: transparent; border: none;")
+        flyer.setScaledContents(True)
+        big = max(start.width(), end.width())
+        flyer.setPixmap(app_info['icon'].pixmap(big, big))
+        flyer.setGeometry(start)
+        effect = QGraphicsOpacityEffect(flyer)
+        effect.setOpacity(1.0)
+        flyer.setGraphicsEffect(effect)
+        flyer.fly_start, flyer.fly_end, flyer.fly_fade = QRect(start), QRect(end), bool(fade)
+        flyer.show()
+        flyer.raise_()
+        anim = QVariantAnimation(flyer)
+        anim.setDuration(int(duration or ICON_FLY_MS))
+        anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+
+        def step(t, flyer=flyer, effect=effect, start=QRectF(start), end=QRectF(end), fade=fade):
+            if sip.isdeleted(flyer):
+                return
+            flyer.setGeometry(self._rect_between(start, end, float(t)))
+            if fade:
+                effect.setOpacity(max(0.0, min(1.0, (1.0 - float(t)) / 0.4)))
+
+        def done(flyer=flyer):
+            if flyer in self._flyers:
+                self._flyers.remove(flyer)
+            if not sip.isdeleted(flyer):
+                flyer.hide()
+                flyer.deleteLater()
+
+        anim.valueChanged.connect(step)
+        anim.finished.connect(done)
+        flyer.fly_anim = anim
+        self._flyers.append(flyer)
+        anim.start()
+        return flyer
+
+    # ── the lists at the two sides while an icon is dragged ──
+    def page_label(self, number=None) -> str:
+        if number is None:
+            return QCoreApplication.translate('LaunchpadWindow', "New page")
+        return QCoreApplication.translate('LaunchpadWindow', "Page %1").replace('%1', str(number + 1))
+
+    def new_group_label(self) -> str:
+        return QCoreApplication.translate('AppButton', '🆕 New group').replace('🆕', '').strip()
+
+    def drag_rail_items(self, side, dragging_group=False):
+        """What a side's list holds. The groups, in the grid's order, then "new group" — on both sides,
+        unless every page keeps its own icons: then the right side lists the pages (drop = to the
+        front of that page's apps), then "new page"."""
+        if side > 0 and self._separate_now():
+            return [{'kind': 'page', 'page': number} for number in range(self.total_pages())] + [{'kind': 'newpage'}]
+        if dragging_group:       # a group does not go into a group: no list of groups
+            return []
+        return [{'kind': 'group', 'group': g} for g in self.groups_in_display_order()] + [{'kind': 'new'}]
+
+    def show_drag_rails(self, app_btn=None, dragging_group=False):
+        if self.group_widget is not None and self.group_widget.isVisible():
+            return
+        if not self._drag_rails:
+            self._drag_rails = [DragRail(self, -1), DragRail(self, +1)]
+        grid = self.main_content.grid_widget
+        top = grid.mapTo(self, QPoint(0, 0)).y()
+        margins = self.main_content.content_margins()
+        for rail in self._drag_rails:
+            rail.set_items(self.drag_rail_items(rail.side, dragging_group))
+            if not rail.items:
+                rail.hide()
+                continue
+            height = min(rail.content_height(), grid.height())
+            room = margins.left() if rail.side < 0 else margins.right()
+            inset = max(4, (room - RAIL_WIDTH) // 2)
+            x = inset if rail.side < 0 else self.width() - inset - RAIL_WIDTH
+            rail.place(QPoint(x, top + (grid.height() - height) // 2), height)
+            rail.slide_in()
+
+    def hide_drag_rails(self):
+        for rail in self._drag_rails:
+            rail.slide_out()
+
+    def rail_drop(self, item, app_path, where):
+        """An icon was dropped on a group (or on "new group") in a side list: into that group; it flies
+        from where it was let go to the group's tile in the grid."""
+        if app_path.startswith(GROUP_DRAG_PREFIX):
+            group = next((g for g in self.groups if g['name'] == app_path[len(GROUP_DRAG_PREFIX):]), None)
+            if group is not None and item['kind'] in ('page', 'newpage'):
+                self.move_app_to_page(group, item['page'] if item['kind'] == 'page' else self.total_pages(),
+                                      kind='group')
+            return
+        app_info = next((a for a in self.apps if a['path'] == app_path), None)
+        if app_info is None or any(app_info in g['apps'] for g in self.groups):
+            return
+        if item['kind'] in ('page', 'newpage'):
+            self.move_app_to_page(app_info, item['page'] if item['kind'] == 'page' else self.total_pages())
+            return
+        from types import SimpleNamespace
+        start = QRect(where.x() - 32, where.y() - 32, 64, 64)
+        self.combine_app_to_group(SimpleNamespace(app_info=app_info), item.get('group'), start_rect=start)
+
+    def combine_app_to_group(self, app_btn, group, start_rect=None):
+        start = start_rect if start_rect is not None else self._icon_rect(app_btn)
+        was_searching = bool(self.main_content.search_bar.text().strip())
+        before = None if was_searching else self._grid_snapshot()
+        moved_app = app_btn.app_info
         # 先从所有分组移除该 app，防止重复
         for g in self.groups:
             if app_btn.app_info in g['apps']:
                 g['apps'].remove(app_btn.app_info)
                 g['icon'] = create_group_icon(g['apps'])
         if group is None:
-            group = {'name': 'New Group', 'apps': [app_btn.app_info], 'icon': create_group_icon([app_btn.app_info])}
+            group = {'name': self.unique_group_name(self.new_group_label()), 'apps': [app_btn.app_info],
+                     'icon': create_group_icon([app_btn.app_info])}
             self.groups.append(group)
             # 新增：将新 group 加在所有 group 类型的末尾
             last_group_idx = -1
@@ -4418,16 +5399,23 @@ class LaunchpadWindow(QWidget):
             if typ == 'app' and obj == app_btn.app_info:
                 del self.main_order[idx]
                 break
-        save_groups(self.groups)
         self.filtered_apps = [a for a in self.apps if not any(a in g['apps'] for g in self.groups)]
         self.display_apps(self.filtered_apps, self.current_page)
-        self.save_current_order()
+        self.sync_group_order()
         is_searching = bool(self.main_content.search_bar.text().strip())
         if is_searching:
             self.main_content.search_bar.setText('')
+        # the icon flies onto its small place on the group's tile; the icons after it close up
+        self._settle_grid()
+        landing, exact = self._group_landing(group)
+        if before is not None:
+            self._animate_reflow(before)
+        self._fly_icon(moved_app, start, landing, fade=not exact, side=self._side_of_page('group', group))
 
     def move_app_to_group(self, app_btn, target_group):
         # 只允许从组内移动到其他组
+        start = self._icon_rect(app_btn)
+        moved_app = app_btn.app_info
         from_group = None
         for group in self.groups:
             if app_btn.app_info in group['apps']:
@@ -4442,103 +5430,141 @@ class LaunchpadWindow(QWidget):
         self.display_apps(self.filtered_apps, self.current_page)
         # 刷新当前组视图（如果有打开的组窗口且是from_group）
         if self.group_widget and from_group and self.group_widget.group is from_group:
-            self.group_widget.display_apps(from_group['apps'], self.group_widget.current_page)
+            self.group_widget.display_apps_animated(from_group['apps'], self.group_widget.current_page)
+        # the icon flies to the other group's tile (behind the blur: it melts away as it arrives)
+        self._settle_grid()
+        landing, _exact = self._group_landing(target_group)
+        self._fly_icon(moved_app, start, landing, fade=True, side=self._side_of_page('group', target_group))
+
+    def group_tile_rect(self, group):
+        """Where this group's glass tile is in the window right now — what its panel grows out of and
+        shrinks back into. Not on this page (or no tile): a small square in the middle."""
+        for button in self.main_content.grid_widget.findChildren(GroupButton):
+            try:
+                if button.group is group and button.isVisible():
+                    tile = button.icon_label
+                    rect = tile.tile_rect()
+                    return QRectF(QPointF(tile.mapTo(self, QPoint(0, 0))) + rect.topLeft(), rect.size())
+            except RuntimeError:
+                continue
+        side = float(tile_side())
+        return QRectF((self.width() - side) / 2.0, (self.height() - side) / 2.0, side, side)
+
+    @staticmethod
+    def _rect_between(start: QRectF, end: QRectF, t: float) -> QRect:
+        left = start.left() + (end.left() - start.left()) * t
+        top = start.top() + (end.top() - start.top()) * t
+        right = start.right() + (end.right() - start.right()) * t
+        bottom = start.bottom() + (end.bottom() - start.bottom()) * t
+        return QRect(round(left), round(top), max(2, round(right - left)), max(2, round(bottom - top)))
+
+    def _move_group_panel(self, panel, rect: QRect, progress: float):
+        """One step of the panel growing / shrinking. The glass under the panel moves at once (a system
+        view); what Qt draws — the hole for the glass, the content's picture, the blurred icons around —
+        is drawn right now as well, not at the next turn of the event loop: otherwise the glass runs a
+        frame ahead of its own content."""
+        before = panel.geometry()
+        panel.set_morph(progress)
+        panel.setGeometry(rect)
+        self.repaint(before.united(rect).adjusted(-4, -4, 4, 4))
+
+    def _stop_group_animation(self):
+        animation = getattr(self, 'anim', None)
+        self.anim = None
+        if animation is not None:
+            try:
+                animation.stop()
+                animation.deleteLater()
+            except RuntimeError:
+                pass
 
     def show_group_widget(self, group, group_btn=None):
+        """Open a group (style book 5.13): its panel grows out of the group's own tile — position, size
+        and corner in one movement — while what is behind blurs; the content comes in as it grows."""
+        self._stop_group_animation()
         if self.group_widget:
             self.group_widget.hide()
-        self.main_content.search_widget.hide()
-        self.main_content.grid_widget.hide()
-        self.main_content.page_indicator_widget.hide()
-        for i in range(self.main_content.page_indicator.count()):
-            item = self.main_content.page_indicator.itemAt(i)
-            widget = item.widget()
-            if widget:
-                widget.hide()
-        self.group_widget = GroupWidget(group, self, main_window=self, close_group_widget=self.close_group_widget)
-        self.group_widget.setParent(self)
-        group_width = self.group_widget.width()
-        group_height = self.group_widget.height()
-        if group_btn is not None:
-            btn_rect = group_btn.geometry()
-            start_pos = btn_rect.topLeft()
-            start_size = btn_rect.size()
-            self._last_group_btn_rect = btn_rect
-        else:
-            start_pos = QPoint(self.width() // 2, self.height() // 2)
-            start_size = QSize(10, 10)
-            self._last_group_btn_rect = QRect(start_pos, start_size)
-        end_pos = QPoint((self.width() - group_width) // 2, (self.height() - group_height) // 2)
-        end_size = QSize(group_width, group_height)
+            self.group_widget.deleteLater()
+            self.group_widget = None
+        # the search, the grid and the dots stay where they are: blurred and a little darker, not clickable
+        self.scrim.set_picture(self._blurred_behind_group())
+        self.scrim.fade_in()
+        self.scrim.raise_()
+        panel = GroupWidget(group, self, main_window=self, close_group_widget=self.close_group_widget)
+        panel.setParent(self)
+        self.group_widget = panel
+        start = self.group_tile_rect(group)
+        end = QRectF(self.group_panel_rect(panel))
+        panel.begin_morph(0.0)
+        panel.setGeometry(self._rect_between(start, end, 0.0))
+        panel.attach_panel_glass()
+        panel.set_morph(0.0)
+        panel.raise_()
+        panel.show()
 
-        self.group_widget.setGeometry(QRect(start_pos, start_size))
-        self.group_widget.setFixedSize(start_size)
-        self.group_widget.hide()
-        self.group_widget.repaint()
+        animation = QVariantAnimation(self)
+        animation.setDuration(raspberry_ui.GROUP_OPEN_MS)
+        animation.setEasingCurve(QEasingCurve.Type.OutQuart)
+        animation.setStartValue(0.0)
+        animation.setEndValue(1.0)
 
-        # 分别动画
-        pos_anim = QPropertyAnimation(self.group_widget, b"pos")
-        pos_anim.setDuration(200)
-        pos_anim.setStartValue(start_pos)
-        pos_anim.setEndValue(end_pos)
-        pos_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        def step(value, panel=panel, start=start, end=end):
+            try:
+                self._move_group_panel(panel, self._rect_between(start, end, float(value)), float(value))
+            except RuntimeError:
+                pass
 
-        size_anim = QPropertyAnimation(self.group_widget, b"dummy")  # dummy属性
-        size_anim.setDuration(250)  # 缩放慢一点
-        size_anim.setStartValue(start_size)
-        size_anim.setEndValue(end_size)
-        size_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        size_anim.valueChanged.connect(lambda value: self.group_widget.setFixedSize(value))
+        def done(panel=panel, end=end):
+            try:
+                if self.group_widget is panel:
+                    panel.setGeometry(end.toRect())
+                    panel.end_morph()
+            except RuntimeError:
+                pass
 
-        group = QParallelAnimationGroup()
-        group.addAnimation(pos_anim)
-        group.addAnimation(size_anim)
-
-        # 动画开始时再 show
-        def on_anim_start():
-            self.group_widget.show()
-
-        group.stateChanged.connect(
-            lambda new, old: on_anim_start() if new == QAbstractAnimation.State.Running else None)
-
-        group.start()
-        self.anim = group  # 防止被垃圾回收
+        animation.valueChanged.connect(step)
+        animation.finished.connect(done)
+        self.anim = animation
+        animation.start()
 
     def close_group_widget(self):
-        if self.group_widget:
-            # 目标位置和大小
-            btn_rect = self._last_group_btn_rect
-            end_pos = btn_rect.topLeft()
-            end_size = QSize(0, 0)
+        """Close the group: the panel shrinks back into its tile — where that tile is now — and what
+        is behind turns sharp again."""
+        panel = self.group_widget
+        if not panel or getattr(panel, '_closing', False):
+            return
+        panel._closing = True
+        self._stop_group_animation()
+        start = QRectF(panel.geometry())
+        end = self.group_tile_rect(panel.group)
+        progress = panel._morph_t if panel.is_morphing() else 1.0
+        if not panel.is_morphing():
+            panel.begin_morph(1.0)
 
-            # 当前的位置和大小
-            start_pos = self.group_widget.pos()
-            start_size = self.group_widget.size()
+        animation = QVariantAnimation(self)
+        animation.setDuration(raspberry_ui.GROUP_CLOSE_MS)
+        animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        animation.setStartValue(0.0)
+        animation.setEndValue(1.0)
 
-            # 位移动画
-            pos_anim = QPropertyAnimation(self.group_widget, b"pos")
-            pos_anim.setDuration(150)
-            pos_anim.setStartValue(start_pos)
-            pos_anim.setEndValue(end_pos)
-            pos_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        def step(value, panel=panel, start=start, end=end, progress=progress):
+            try:
+                self._move_group_panel(panel, self._rect_between(start, end, float(value)),
+                                       progress * (1.0 - float(value)))
+            except RuntimeError:
+                pass
 
-            # 缩放动画（用 valueChanged 手动 setFixedSize）
-            size_anim = QPropertyAnimation(self.group_widget, b"dummy")
-            size_anim.setDuration(150)
-            size_anim.setStartValue(start_size)
-            size_anim.setEndValue(end_size)
-            size_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-            size_anim.valueChanged.connect(lambda value: self.group_widget.setFixedSize(value))
-
-            group = QParallelAnimationGroup()
-            group.addAnimation(pos_anim)
-            group.addAnimation(size_anim)
-            group.finished.connect(self._close_group_widget)
-            group.start()
-            self.anim = group  # 防止被垃圾回收
+        animation.valueChanged.connect(step)
+        animation.finished.connect(self._close_group_widget)
+        self.anim = animation
+        animation.start()
+        self.scrim.fade_out()
 
     def _close_group_widget(self):
+        if self.group_widget is None:
+            return
         self.group_widget.hide()
+        self.group_widget.deleteLater()
         self.group_widget = None
         self.main_content.search_widget.show()
         self.main_content.grid_widget.show()
@@ -4557,16 +5583,50 @@ class LaunchpadWindow(QWidget):
         for group in self.groups:
             group['icon'] = create_group_icon(group['apps'])
         self.display_apps(self.filtered_apps, self.current_page)
+        self.sync_group_order()
+
+    def groups_in_display_order(self):
+        """The groups in the order they stand in the grid — the one order of groups (Ryan 2026-11-16:
+        「组的顺序和现在用户手动排序的顺序不一致……必须动态一致」): menus list them this way, and the
+        groups file is kept this way."""
+        ordered = [obj for typ, obj in self.main_order if typ == 'group']
+        seen = set(id(g) for g in ordered)
+        return ordered + [g for g in self.groups if id(g) not in seen]
+
+    def sync_group_order(self):
+        """After anything that moves, renames, adds or removes a group: the list of groups follows the
+        grid, and both files (the groups, the order — which knows a group by its name) are written."""
+        self.groups[:] = self.groups_in_display_order()
+        self.group_dict = {g['name']: g for g in self.groups}
         save_groups(self.groups)
-        self.main_content.search_widget.hide()
-        self.main_content.grid_widget.hide()
-        for i in range(self.main_content.page_indicator.count()):
-            item = self.main_content.page_indicator.itemAt(i)
-            widget = item.widget()
-            if widget:
-                widget.hide()
+        self.save_current_order()
+
+    def unique_group_name(self, wanted, group=None):
+        """The saved order knows a group by its name: two groups never share one."""
+        taken = set(g['name'] for g in self.groups if g is not group)
+        if wanted not in taken:
+            return wanted
+        number = 2
+        while '%s %d' % (wanted, number) in taken:
+            number += 1
+        return '%s %d' % (wanted, number)
+
+    def refresh_group_tile(self, group):
+        """The group's small icons changed (their order inside the group): its tile in the grid shows it now."""
+        for button in self.main_content.grid_widget.findChildren(GroupButton):
+            try:
+                if button.group is group:
+                    side = tile_side(button.width())
+                    button.icon_label.setPixmap(group['icon'].pixmap(side, side))
+            except RuntimeError:
+                continue
 
     def remove_app(self, app_info):
+        # the icon shrinks away where it stood, the others close up (Ryan 2026-11-16: these too animate)
+        in_panel = self._app_button(app_info, in_panel=True)
+        in_grid = self._app_button(app_info, in_panel=False)
+        leaving = self._icon_rect(in_panel if in_panel is not None else in_grid) if (in_panel or in_grid) else None
+        before = self._grid_snapshot() if self.isVisible() else None
         # 从所有数据结构中移除
         if app_info in self.apps:
             self.apps.remove(app_info)
@@ -4585,12 +5645,19 @@ class LaunchpadWindow(QWidget):
         save_groups(self.groups)
         self.save_current_order()
         self.display_apps(self.filtered_apps, self.current_page)
+        if before is not None:
+            self._animate_reflow(before)
         # 如果组窗口还开着，刷新组窗口
         if self.group_widget:
             # 只刷新当前显示的组
-            self.group_widget.display_apps(self.group_widget.group['apps'], self.group_widget.current_page)
+            self.group_widget.display_apps_animated(self.group_widget.group['apps'], self.group_widget.current_page)
+        self._vanish_icon(app_info['icon'], leaving)
 
     def disband_group(self, group):
+        # the group's tile shrinks away, the icons close up, its apps fade in where they land
+        tile_button = next((b for b in self.main_content.grid_widget.findChildren(GroupButton) if b.group is group), None)
+        leaving = self._icon_rect(tile_button) if tile_button is not None else None
+        before = self._grid_snapshot() if self.isVisible() else None
         # 将组内所有 app 放回主界面（如果不在其它组），并准备插入 main_order
         apps_to_add = []
         for app in group['apps']:
@@ -4619,6 +5686,9 @@ class LaunchpadWindow(QWidget):
         self.filtered_apps = [a for a in self.apps if not any(a in g['apps'] for g in self.groups)]
         self.display_apps(self.filtered_apps, self.current_page)
         self.save_current_order()
+        if before is not None:
+            self._animate_reflow(before)
+        self._vanish_icon(group['icon'], leaving)
 
     def start_background_scan(self):
         if self.scan_worker and self.scan_worker.isRunning():
@@ -4639,6 +5709,7 @@ class LaunchpadWindow(QWidget):
     def on_new_apps_found(self, result):
         new_apps = result.get('new_apps', [])
         all_paths = set(result.get('all_paths', []))
+        before = self._scan_fingerprint()
         # 新增：首次初始化 main_order
         if not self.main_order:
             # 先加所有分组
@@ -4660,6 +5731,8 @@ class LaunchpadWindow(QWidget):
                     already_in_filtered = any(a['path'] == fa['path'] for fa in self.filtered_apps)
                     if not already_in_filtered:
                         self.filtered_apps.append(a)
+            self.app_dict = {a['path']: a for a in self.apps}
+            self._restore_user_apps([a for a in self.apps if any(a['path'] == n['path'] for n in new_apps)])
         # 检查已删除的 app
         current_paths = set(a['path'] for a in self.apps)
         removed_paths = current_paths - all_paths
@@ -4695,6 +5768,23 @@ class LaunchpadWindow(QWidget):
             # self.save_current_order()
         save_app_order([a['path'] for a in self.filtered_apps])  # save again
         self.save_current_order()
+        # The scan runs every 20 seconds (and 2 seconds after the launcher opens). Laying the icons
+        # out again each time deleted every button under whatever was going on — an open right-click
+        # menu (Ryan's crash 2026-11-16), a page sliding, a drag. Only when something changed:
+        if self._scan_fingerprint() != before:
+            self._display_after_scan()
+
+    def _scan_fingerprint(self):
+        """What the icon grid is made of (to tell whether a scan changed anything)."""
+        return ([a['path'] for a in self.apps], [a['path'] for a in self.filtered_apps],
+                [(typ, obj.get('path') or obj.get('name')) for typ, obj in self.main_order],
+                [[a['path'] for a in g['apps']] for g in self.groups])
+
+    def _display_after_scan(self):
+        """Lay the icons out again for what the scan found — once no system menu is open over them."""
+        if glass_kit._ACTIVE_NATIVE_MENU.get('menu') is not None:
+            QTimer.singleShot(400, self._display_after_scan)
+            return
         self.display_apps(self.filtered_apps, self.current_page)
 
     # def keyPressEvent(self, event):
@@ -4742,7 +5832,7 @@ class LaunchpadWindow(QWidget):
         #self.focused_btn.setStyleSheet(self.focused_btn.styleSheet() + "border: 2px solid #0085FF;")
         # 只给icon_label加边框
         self.focused_btn.icon_label.setStyleSheet(
-            "border: 1.5px solid #0085FF; border-radius: 24px; padding: 0px;"
+            raspberry_ui.focus_ring_qss()
         )
         # 让主窗口重新获得焦点，保证事件过滤器继续生效
         self.setFocus()
@@ -4767,7 +5857,7 @@ class LaunchpadWindow(QWidget):
         #self.focused_btn.setStyleSheet(self.focused_btn.styleSheet() + "border: 2px solid #0085FF;")
         # 只给icon_label加边框
         self.focused_btn.icon_label.setStyleSheet(
-            "border: 1.5px solid #0085FF; border-radius: 24px; padding: 0px;"
+            raspberry_ui.focus_ring_qss()
         )
         self.setFocus()
 
@@ -4789,7 +5879,7 @@ class LaunchpadWindow(QWidget):
             self.focus_index = (self.focus_index - apps_per_row) % len(btns)
         self.focused_btn = btns[self.focus_index]
         self.focused_btn.icon_label.setStyleSheet(
-            "border: 1.5px solid #0085FF; border-radius: 24px; padding: 0px;"
+            raspberry_ui.focus_ring_qss()
         )
         self.setFocus()
 
@@ -4811,7 +5901,7 @@ class LaunchpadWindow(QWidget):
             self.focus_index = (self.focus_index + apps_per_row) % len(btns)
         self.focused_btn = btns[self.focus_index]
         self.focused_btn.icon_label.setStyleSheet(
-            "border: 1.5px solid #0085FF; border-radius: 24px; padding: 0px;"
+            raspberry_ui.focus_ring_qss()
         )
         self.setFocus()
 
@@ -4957,6 +6047,8 @@ class LaunchpadWindow(QWidget):
         return False
 
     def move_app_out_of_group(self, app_info, group):
+        source = self._app_button(app_info, in_panel=True)
+        start = self._icon_rect(source) if source is not None else None
         # 从 group 里移除
         if app_info in group['apps']:
             group['apps'].remove(app_info)
@@ -5000,7 +6092,13 @@ class LaunchpadWindow(QWidget):
 
         # 如果组窗口还开着，刷新组窗口
         if self.group_widget and self.group_widget.group is group:
-            self.group_widget.display_apps(group['apps'], self.group_widget.current_page)
+            self.group_widget.display_apps_animated(group['apps'], self.group_widget.current_page)
+        # the icon flies out of the panel to its new place in the grid (behind the blur: it melts
+        # away as it arrives; on another page: towards that side)
+        self._settle_grid()
+        target = self._app_button(app_info, in_panel=False)
+        self._fly_icon(app_info, start, self._icon_rect(target) if target is not None else None, fade=True,
+                       side=self._side_of_page('app', app_info))
 
     def clear_icon_cache_and_refresh(self):
         if self.clear_cache_worker and self.clear_cache_worker.isRunning():
@@ -5031,6 +6129,24 @@ class LaunchpadWindow(QWidget):
         # if msg.exec() == 0:
         #     QTimer.singleShot(0, self.restart_app)
 
+    SHOW_LANDING_CHECK_MS = 450
+
+    def _check_show_landing(self, serial, wanted):
+        """Stage Manager (2026-11-25): something moved the launcher or made it smaller after it was shown →
+        back over the whole screen, once per showing."""
+        if serial != getattr(self, '_show_serial', 0) or not self.isVisible():
+            return 'stale'
+        got = self.geometry()
+        if (abs(got.x() - wanted.x()) <= 8 and abs(got.y() - wanted.y()) <= 8
+                and got.width() >= wanted.width() - 8 and got.height() >= wanted.height() - 8):
+            return 'in place'
+        logging.info('Main window was moved after it was shown: wanted %dx%d at (%d,%d), found %dx%d at (%d,%d) -> put back once',
+                     wanted.width(), wanted.height(), wanted.x(), wanted.y(), got.width(), got.height(), got.x(), got.y())
+        self.setGeometry(QRect(wanted))
+        self.main_content.setGeometry(self.rect())
+        self._show_put_back = getattr(self, '_show_put_back', 0) + 1
+        return 'put back'
+
     def show_main_window(self):
         if not self.isVisible():
             self.showNormal()
@@ -5039,7 +6155,23 @@ class LaunchpadWindow(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self.apply_show_on_all_spaces()     # before the window is put on the screen
+        # the Dock: unless it is kept showing, this window hides it in a moment (hide_dock below) → no
+        # room is kept for it; then the real state is read again once the Dock has settled
+        _screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        if getattr(self, '_force_show_dock', False) and _screen is not None:
+            self.apply_dock_insets(geometry=_screen.geometry())
+        else:
+            self.apply_dock_insets((0, 0, 0))
+        for _delay in (350, 900, 1800):
+            QTimer.singleShot(_delay, self._recheck_dock)
         rendered = self.adapt_to_screen()  # 每次 show 都刷新几何
+        raspberry_ui.keep_out_of_stage_manager(self)
+        # … and once it is up: still covering the screen it was put on? (put back once, nothing is fought over)
+        self._show_serial = getattr(self, '_show_serial', 0) + 1
+        QTimer.singleShot(self.SHOW_LANDING_CHECK_MS, lambda serial=self._show_serial, wanted=QRect(self.geometry()): self._check_show_landing(serial, wanted))
+        self.backdrop.prepare(self.geometry())  # this screen's clean wallpaper, blurred
+        self.menu_bar_cover.start()             # over the menu bar until this window is hidden
         if not rendered:
             self.display_apps(self.filtered_apps, self.current_page)
         self.prepare_icons_for_animation()
@@ -5072,6 +6204,7 @@ class LaunchpadWindow(QWidget):
         self._fade_anim = None
 
     def hideEvent(self, event):
+        self.menu_bar_cover.follow()            # gone with the launcher, at once
         if self._always_hide_dock == False:
             self.show_dock()
         super().hideEvent(event)
@@ -5084,71 +6217,78 @@ class LaunchpadWindow(QWidget):
         if file_dialog.exec():
             selected_files = file_dialog.selectedFiles()
             if selected_files:
-                app_path = selected_files[0]
-                info_plist = os.path.join(app_path, 'Contents', 'Info.plist')
-                itunes_plist = os.path.join(app_path, 'Wrapper', 'iTunesMetadata.plist')
-                name = None
-                plist = None
-                # 1. 优先 Info.plist
-                if os.path.exists(info_plist):
-                    try:
-                        with open(info_plist, 'rb') as f:
-                            plist = plistlib.load(f)
-                        name = plist.get('CFBundleDisplayName') or plist.get('CFBundleName') or os.path.basename(app_path)[:-4]
-                    except Exception as e:
-                        #QMessageBox.warning(self, "错误", f"解析 Info.plist 失败: {e}")
-                        msg = CustomMessageBox(self.tr(f"Failed to parse Info.plist: %n").replace('%n', str(e)), parent=self, buttons=(self.tr("OK"),))
-                        msg.exec()
-                        return
-                # 2. iOS 应用的 iTunesMetadata.plist
-                elif os.path.exists(itunes_plist):
-                    try:
-                        with open(itunes_plist, 'rb') as f:
-                            plist = plistlib.load(f)
-                        name = plist.get('title') or plist.get('itemName') or os.path.basename(app_path)[:-4]
-                    except Exception as e:
-                        #QMessageBox.warning(self, "错误", f"解析 iTunesMetadata.plist 失败: {e}")
-                        msg = CustomMessageBox(self.tr(f"Failed to parse iTunesMetadata.plist: %n").replace('%n', str(e)), parent=self, buttons=(self.tr("OK"),))
-                        msg.exec()
-                        return
-                # 3. 都没有就用文件夹名
-                if not name:
-                    name = os.path.basename(app_path)[:-4]
-                # 删除该 app 的缓存图标文件
-                cache_path = app_icon_cache_path(app_path, name)
-                if os.path.exists(cache_path):
-                    os.remove(cache_path)
-                # 重新获取图标并缓存
-                icon = get_finder_icon(app_path)
-                if not icon.isNull():
-                    save_icon_to_cache(icon, app_path, name)
+                status, name = self.refresh_app_icon(selected_files[0])
+                if status == 'info_plist_error':
+                    text = self.tr(f"Failed to parse Info.plist: %n").replace('%n', name)
+                elif status == 'itunes_plist_error':
+                    text = self.tr(f"Failed to parse iTunesMetadata.plist: %n").replace('%n', name)
+                elif status == 'no_icon':
+                    text = self.tr("Unable to retrieve the icon for this app.")
+                elif status == 'updated':
+                    text = self.tr(f"The icon cache for %n has been updated.").replace('%n', name)
                 else:
-                    #QMessageBox.warning(self, "错误", "无法获取该App的图标。")
-                    msg = CustomMessageBox(self.tr("Unable to retrieve the icon for this app."), parent=self, buttons=(self.tr("OK"),))
-                    msg.exec()
-                    return
-                # 更新内存中的app信息
-                updated = False
-                for app in self.apps:
-                    if app['path'] == app_path:
-                        app['icon'] = icon
-                        app['name'] = name
-                        updated = True
-                for group in self.groups:
-                    for idx, app in enumerate(group['apps']):
-                        if app['path'] == app_path:
-                            group['apps'][idx]['icon'] = icon
-                            group['apps'][idx]['name'] = name
-                            group['icon'] = create_group_icon(group['apps'])
-                if updated:
-                    self.display_apps(self.filtered_apps, self.current_page)
-                    msg = CustomMessageBox(self.tr(f"The icon cache for %n has been updated.").replace('%n', name), parent=self, buttons=(self.tr("OK"),))
-                    msg.exec()
-                    #QMessageBox.information(self, "完成", f"{name} 的图标缓存已更新。")
-                else:
-                    msg = CustomMessageBox(self.tr(f"The icon of %n has been cached, but the app is not in the main interface list.").replace('%n', name), parent=self, buttons=(self.tr("OK"),))
-                    msg.exec()
-                    #QMessageBox.information(self, "提示", f"已缓存 {name} 的图标，但该App不在主界面列表中。")
+                    text = self.tr(f"The icon of %n has been cached, but the app is not in the main interface list.").replace('%n', name)
+                msg = CustomMessageBox(text, parent=self, buttons=(self.tr("OK"),))
+                msg.exec()
+
+    def refresh_app_icon(self, app_path):
+        """One app's icon is read again and cached (the menu's "Update the specified app icon cache" and
+        an assistant app's tool both use it; no notice here). Returns (status, text): 'updated' /
+        'cached_only' (not in the list) / 'no_icon' with the app's name, or 'info_plist_error' /
+        'itunes_plist_error' with the error."""
+        # the dialog hands an app over as a folder ("/Applications/X.app/"): the list knows it
+        # without the last slash, and "X.app/"[:-4] would not be its name either
+        app_path = os.path.normpath(app_path)
+        info_plist = os.path.join(app_path, 'Contents', 'Info.plist')
+        itunes_plist = os.path.join(app_path, 'Wrapper', 'iTunesMetadata.plist')
+        name = None
+        plist = None
+        # 1. 优先 Info.plist
+        if os.path.exists(info_plist):
+            try:
+                with open(info_plist, 'rb') as f:
+                    plist = plistlib.load(f)
+                name = plist.get('CFBundleDisplayName') or plist.get('CFBundleName') or os.path.basename(app_path)[:-4]
+            except Exception as e:
+                return 'info_plist_error', str(e)
+        # 2. iOS 应用的 iTunesMetadata.plist
+        elif os.path.exists(itunes_plist):
+            try:
+                with open(itunes_plist, 'rb') as f:
+                    plist = plistlib.load(f)
+                name = plist.get('title') or plist.get('itemName') or os.path.basename(app_path)[:-4]
+            except Exception as e:
+                return 'itunes_plist_error', str(e)
+        # 3. 都没有就用文件夹名
+        if not name:
+            name = os.path.basename(app_path)[:-4]
+        # 删除该 app 的缓存图标文件
+        cache_path = app_icon_cache_path(app_path, name)
+        if os.path.exists(cache_path):
+            os.remove(cache_path)
+        # 重新获取图标并缓存
+        icon = get_finder_icon(app_path)
+        if not icon.isNull():
+            save_icon_to_cache(icon, app_path, name)
+        else:
+            return 'no_icon', name
+        # 更新内存中的app信息
+        updated = False
+        for app in self.apps:
+            if app['path'] == app_path:
+                app['icon'] = icon
+                app['name'] = name
+                updated = True
+        for group in self.groups:
+            for idx, app in enumerate(group['apps']):
+                if app['path'] == app_path:
+                    group['apps'][idx]['icon'] = icon
+                    group['apps'][idx]['name'] = name
+                    group['icon'] = create_group_icon(group['apps'])
+        if updated:
+            self.display_apps(self.filtered_apps, self.current_page)
+            return 'updated', name
+        return 'cached_only', name
 
     def always_hide_dock(self):
         self._always_hide_dock = self.always_hide_dock_action.isChecked()
@@ -5183,28 +6323,20 @@ class LaunchpadWindow(QWidget):
     def hide_dock(self):
         if getattr(self, '_force_show_dock', False):
             return  # 如果强制显示 Dock，则不执行
-        try:
-            toggle_dock_script = '''
-                tell application "System Events" to set the autohide of dock preferences to true
-            '''
-            subprocess.run(["osascript", "-e", toggle_dock_script], env=clean_env_for_child())
-        except Exception as e:
-            pass
+        set_dock_autohide(True)
 
     def show_dock(self):
         # if getattr(self, '_force_show_dock', False):
         #     return  # 如果强制显示 Dock，则不执行
-        try:
-            toggle_dock_script = '''
-                tell application "System Events" to set the autohide of dock preferences to false
-            '''
-            subprocess.run(["osascript", "-e", toggle_dock_script], env=clean_env_for_child())
-        except Exception as e:
-            pass
+        set_dock_autohide(False)
 
     def wheelEvent(self, event):
         # 动画期间禁翻，避免状态冲突
         if getattr(self, "_is_animating", False):
+            event.accept()
+            return
+        # an open group floats on the grid: the pages behind it stay where they are
+        if self.group_widget is not None and self.group_widget.isVisible():
             event.accept()
             return
 
@@ -5213,139 +6345,13 @@ class LaunchpadWindow(QWidget):
         dx = pixel_delta.x() if pixel_delta.x() != 0 else int(angle_delta.x() / 2)
 
         if dx != 0:
-            # 初始化触控板滑动会话
-            if not getattr(self, "_touchpad_swipe_active", False):
-                self._touchpad_swipe_active = True
-                self._touchpad_swipe_accum = 0
-                self._touchpad_swipe_btns = []
-                grid_layout = self.main_content.grid_layout
-                for i in range(grid_layout.count()):
-                    w = grid_layout.itemAt(i).widget()
-                    if isinstance(w, (AppButton, GroupButton)):
-                        self._touchpad_swipe_btns.append(w)
-                for btn in self._touchpad_swipe_btns:
-                    if sip.isdeleted(btn):
-                        continue
-                    btn._orig_pos = btn.pos()
-
-            # 累计位移
-            self._touchpad_swipe_accum += dx
-
-            page_w = self.main_content.grid_widget.width()
-            threshold = page_w // 2
-
-            # 实时越阈值：立刻触发（不等松手）
-            if abs(self._touchpad_swipe_accum) >= threshold:
-                direction = "left" if self._touchpad_swipe_accum < 0 else "right"
-                is_first_page = (self.current_page == 0)
-                is_last_page = (self.current_page == self.total_pages() - 1)
-
-                # 首页右滑 / 末页左滑：四分之一页回弹
-                if (direction == "right" and is_first_page) or (direction == "left" and is_last_page):
-                    group = QParallelAnimationGroup(self)
-                    for btn in self._touchpad_swipe_btns:
-                        if sip.isdeleted(btn):
-                            continue
-                        orig = getattr(btn, "_orig_pos", btn.pos())
-                        anim = QPropertyAnimation(btn, b"pos", self)
-                        anim.setDuration(180)
-                        anim.setStartValue(btn.pos())
-                        anim.setEndValue(orig)
-                        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-                        group.addAnimation(anim)
-
-                    def after_bounce():
-                        # 彻底复位滑动状态
-                        self._touchpad_swipe_active = False
-                        self._touchpad_swipe_accum = 0
-                        self._touchpad_swipe_direction = None
-                        self._touchpad_swipe_btns = []
-
-                    # 停掉迟到的“松手计时器”
-                    if hasattr(self, "_touchpad_swipe_timer") and self._touchpad_swipe_timer.isActive():
-                        self._touchpad_swipe_timer.stop()
-
-                    group.finished.connect(after_bounce)
-                    group.start()
-                    self._touchpad_swipe_anim = group
-                    event.accept()
-                    return
-
-                # 正常翻页（每次只翻一页）
-                if direction == "left":
-                    target_page = min(self.current_page + 1, self.total_pages() - 1)
-                    remaining = -page_w - self._touchpad_swipe_accum
-                else:
-                    target_page = max(self.current_page - 1, 0)
-                    remaining = page_w - self._touchpad_swipe_accum
-
-                # 若有旧动画在跑，停掉，避免僵尸动画阻塞 finished
-                try:
-                    if hasattr(self, "anim") and self.anim is not None:
-                        self.anim.stop()
-                except Exception:
-                    pass
-
-                self._is_animating = True
-
-                group = QParallelAnimationGroup(self)
-                for btn in self._touchpad_swipe_btns:
-                    if sip.isdeleted(btn):
-                        continue
-                    anim = QPropertyAnimation(btn, b"pos", self)
-                    # 时长上限，避免异常起点导致的超长动画
-                    duration = min(240, 160 + int(min(abs(remaining), page_w) * 0.25))
-                    anim.setDuration(duration)
-                    anim.setStartValue(btn.pos())
-                    anim.setEndValue(btn.pos() + QPoint(remaining, 0))
-                    anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-                    group.addAnimation(anim)
-
-                def after_swipe_out():
-                    # 核心：直接切页，不再进 goto_page → animate_page_transition 的第二段过场
-                    self.goto_page_immediate(target_page)
-
-                    # 彻底清理状态，确保下一次滑动正常
-                    self._is_animating = False
-                    self._touchpad_swipe_active = False
-                    self._touchpad_swipe_accum = 0
-                    self._touchpad_swipe_direction = None
-                    self._touchpad_swipe_btns = []
-
-                # 停掉迟到的“松手计时器”，防止回调叠加
-                if hasattr(self, "_touchpad_swipe_timer") and self._touchpad_swipe_timer.isActive():
-                    self._touchpad_swipe_timer.stop()
-
-                group.finished.connect(after_swipe_out)
-                group.start()
-                self._touchpad_swipe_anim = group
-
-                event.accept()
-                return
-
-            # 未越阈值：跟手移动
-            for btn in self._touchpad_swipe_btns:
-                if sip.isdeleted(btn):
-                    continue
-                orig = getattr(btn, "_orig_pos", btn.pos())
-                btn.move(orig + QPoint(self._touchpad_swipe_accum, 0))
-
-            self._touchpad_swipe_direction = "left" if self._touchpad_swipe_accum < 0 else "right"
-
-            # “松手回弹”的兜底计时器（若中断输入，仍能回弹）
-            if hasattr(self, "_touchpad_swipe_timer") and self._touchpad_swipe_timer.isActive():
-                self._touchpad_swipe_timer.stop()
-            else:
-                self._touchpad_swipe_timer = QTimer(self)
-                self._touchpad_swipe_timer.setSingleShot(True)
-                self._touchpad_swipe_timer.timeout.connect(self._on_touchpad_swipe_release)
-            self._touchpad_swipe_timer.start(300)
-
+            # the page on screen and the one coming in move together under the fingers (PageSlide)
+            self._page_slide.wheel(dx, event.phase() == Qt.ScrollPhase.ScrollMomentum)
             event.accept()
             return
 
         # 正在触控板滑动会话时，忽略垂直滚动，避免干扰
-        if getattr(self, "_touchpad_swipe_active", False):
+        if self._page_slide.active():
             event.accept()
             return
 
@@ -5398,6 +6404,8 @@ class LaunchpadWindow(QWidget):
             effect = QGraphicsOpacityEffect(btn)
             btn.setGraphicsEffect(effect)
             effect.setOpacity(0.0)
+            if isinstance(btn, GroupButton):
+                btn.bind_fade(effect)
 
     # def animate_icons_in(self):  # 是移动+渐变动画
     #     grid_layout = self.main_content.grid_layout
@@ -5451,52 +6459,78 @@ class LaunchpadWindow(QWidget):
     #
     #     anim_group.start()
 
-    def animate_icons_in(self):  # 缩放+渐变动画
-        grid_layout = self.main_content.grid_layout
-        duration = 400
+    def animate_icons_in(self):
+        """The launcher opens (Ryan 2026-11-16: 「从屏幕中间向四周放射性淡入，不用路程很长，就一点点
+        就行」): every icon fades in while it moves a short way outwards, away from the middle of the
+        grid, to its place; the ones further out start a moment later."""
+        self._finish_reflow()
+        self._settle_grid()
+        grid = self.main_content.grid_widget
+        centre = QPointF(grid.width() / 2.0, grid.height() / 2.0)
+        buttons = [w for w in grid.findChildren(QPushButton, options=Qt.FindChildOption.FindDirectChildrenOnly)
+                   if isinstance(w, (AppButton, GroupButton))]
+        reach = max([math.hypot(b.x() + b.width() / 2.0 - centre.x(), b.y() + b.height() / 2.0 - centre.y())
+                     for b in buttons] + [1.0])
         anim_group = QParallelAnimationGroup(self)
-
-        for i in range(grid_layout.count()):
-            btn = grid_layout.itemAt(i).widget()
-            if not isinstance(btn, (AppButton, GroupButton)):
-                continue
-
-            # 记录最终位置和大小
-            final_pos = btn.pos()
-            final_size = btn.size()
-            scale_factor = 1.25
-
-            # 初始缩放
-            scaled_width = int(final_size.width() * scale_factor)
-            scaled_height = int(final_size.height() * scale_factor)
-            start_pos = final_pos - QPoint((scaled_width - final_size.width()) // 2,
-                                           (scaled_height - final_size.height()) // 2)
-
-            btn.setGeometry(QRect(start_pos, QSize(scaled_width, scaled_height)))
-
-            # 透明度动画
-            effect = QGraphicsOpacityEffect(btn)
-            btn.setGraphicsEffect(effect)
+        effects = []
+        for btn in buttons:
+            final = btn.pos()
+            dx = final.x() + btn.width() / 2.0 - centre.x()
+            dy = final.y() + btn.height() / 2.0 - centre.y()
+            dist = math.hypot(dx, dy)
+            shift = min(float(ENTRANCE_SHIFT), dist * 0.12)
+            start = final if dist < 1.0 else QPoint(int(round(final.x() - dx / dist * shift)),
+                                                    int(round(final.y() - dy / dist * shift)))
+            wait = ENTRANCE_STAGGER * dist / reach          # the share of the time it waits first
+            effect = btn.graphicsEffect()
+            if not isinstance(effect, QGraphicsOpacityEffect):
+                effect = QGraphicsOpacityEffect(btn)
+                btn.setGraphicsEffect(effect)
+                if isinstance(btn, GroupButton):
+                    btn.bind_fade(effect)
             effect.setOpacity(0.0)
+            effects.append((btn, effect))
+            btn.move(start)
 
-            opacity_anim = QPropertyAnimation(effect, b"opacity", self)
-            opacity_anim.setDuration(duration*2)
-            opacity_anim.setStartValue(0.0)
-            opacity_anim.setEndValue(1.0)
-            opacity_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            opacity_anim = QPropertyAnimation(effect, b"opacity", anim_group)
+            opacity_anim.setDuration(ENTRANCE_MS)
+            opacity_anim.setKeyValueAt(0.0, 0.0)
+            opacity_anim.setKeyValueAt(wait, 0.0)
+            opacity_anim.setKeyValueAt(min(1.0, wait + 0.6), 1.0)
+            opacity_anim.setKeyValueAt(1.0, 1.0)
 
-            # 缩放动画（通过 setGeometry）
-            size_anim = QPropertyAnimation(btn, b"geometry", self)
-            size_anim.setDuration(duration)
-            size_anim.setStartValue(QRect(start_pos, QSize(scaled_width, scaled_height)))
-            size_anim.setEndValue(QRect(final_pos, final_size))
-            size_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            pos_anim = QPropertyAnimation(btn, b"pos", anim_group)
+            pos_anim.setDuration(ENTRANCE_MS)
+            pos_anim.setKeyValueAt(0.0, start)
+            pos_anim.setKeyValueAt(wait, start)
+            pos_anim.setKeyValueAt(1.0, final)
+            pos_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
             anim_group.addAnimation(opacity_anim)
-            anim_group.addAnimation(size_anim)
+            anim_group.addAnimation(pos_anim)
 
+        def done(effects=effects):
+            # the icons are drawn directly again (an opacity effect draws each through a picture)
+            for btn, effect in effects:
+                try:
+                    if not sip.isdeleted(btn) and btn.graphicsEffect() is effect:
+                        if isinstance(btn, GroupButton):
+                            btn.icon_label.set_glass_opacity(1.0)
+                        btn.setGraphicsEffect(None)
+                except RuntimeError:
+                    pass
+
+        anim_group.finished.connect(done)
+        # the glass under the group tiles moves at once, Qt draws on its next turn: draw with it
+        if buttons:
+            driver = QVariantAnimation(anim_group)
+            driver.setDuration(ENTRANCE_MS)
+            driver.setStartValue(0.0)
+            driver.setEndValue(1.0)
+            driver.valueChanged.connect(lambda _v, grid=grid: grid.repaint() if not sip.isdeleted(grid) and grid.isVisible() else None)
+            anim_group.addAnimation(driver)
         anim_group.start()
-        self.anim = anim_group  # 防止被垃圾回收
+        self._entrance = anim_group
 
     def move_focused_btn_left(self):
         # 全局 main_order 移动，支持跨页
@@ -5512,14 +6546,14 @@ class LaunchpadWindow(QWidget):
         if idx == 0:
             return
         # 交换
-        self.main_order[idx], self.main_order[idx - 1] = self.main_order[idx - 1], self.main_order[idx]
-        self.save_current_order()
+        self._swap_in_main_order(idx, idx - 1)
+        self.sync_group_order()
         # 计算新页码
-        new_page = (idx - 1) // self.items_per_page
+        new_page = self.page_of_index(idx - 1)
         self.current_page = new_page
         self.display_apps(self.filtered_apps, self.current_page)
         # 聚焦到新位置
-        self.focus_index = (idx - 1) % self.items_per_page
+        self.focus_index = (idx - 1) - self.page_start(new_page)
         self.set_focus_by_global_index(idx - 1)
 
     def move_focused_btn_right(self):
@@ -5533,19 +6567,27 @@ class LaunchpadWindow(QWidget):
             return
         if idx == len(self.main_order) - 1:
             return
-        self.main_order[idx], self.main_order[idx + 1] = self.main_order[idx + 1], self.main_order[idx]
-        self.save_current_order()
-        new_page = (idx + 1) // self.items_per_page
+        self._swap_in_main_order(idx, idx + 1)
+        self.sync_group_order()
+        new_page = self.page_of_index(idx + 1)
         self.current_page = new_page
         self.display_apps(self.filtered_apps, self.current_page)
-        self.focus_index = (idx + 1) % self.items_per_page
+        self.focus_index = (idx + 1) - self.page_start(new_page)
         self.set_focus_by_global_index(idx + 1)
+
+    def _swap_in_main_order(self, a, b):
+        """Two neighbours change places (with separate pages: also their pages, when they are on two)."""
+        order = self.main_order
+        order[a], order[b] = order[b], order[a]
+        if self.pages_are_separate():
+            page_a, page_b = order[a][1].get('_page'), order[b][1].get('_page')
+            order[a][1]['_page'], order[b][1]['_page'] = page_b, page_a
+            self._normalise_pages()
 
     def set_focus_by_global_index(self, global_idx):
         # 在当前页找到对应按钮并聚焦
         grid_layout = self.main_content.grid_layout
-        page_start = self.current_page * self.items_per_page
-        page_end = page_start + self.items_per_page
+        page_start = self.page_start(self.current_page)
         rel_idx = global_idx - page_start
         btns = []
         for i in range(grid_layout.count()):
@@ -5555,7 +6597,7 @@ class LaunchpadWindow(QWidget):
         if 0 <= rel_idx < len(btns):
             self.focused_btn = btns[rel_idx]
             self.focused_btn.icon_label.setStyleSheet(
-                "border: 1.5px solid #0085FF; border-radius: 24px; padding: 0px;"
+                raspberry_ui.focus_ring_qss()
             )
             self.focus_index = rel_idx
             self.setFocus()
@@ -5569,6 +6611,14 @@ class LaunchpadWindow(QWidget):
             else:
                 order_ids.append(obj['path'])
         save_main_order(order_ids)
+        if self.pages_are_separate():
+            self._saved_pages = {self._order_id(typ, obj): obj['_page'] for typ, obj in self.main_order
+                                 if isinstance(obj.get('_page'), int)}
+            try:
+                with open(PAGES_FILE, "w", encoding="utf-8") as f:
+                    json.dump(self._saved_pages, f, ensure_ascii=False)
+            except Exception:
+                pass
 
     def login_start(self):
         plist_filename = 'com.ryanthehito.raspberry.plist'
@@ -5810,62 +6860,26 @@ class LaunchpadWindow(QWidget):
                                            parent=self, buttons=(self.tr("OK"),))
                     msg.exec()
 
-    def animate_page_transition(self, next_page_items, direction="left"):
-        # 动画重入保护
-        if getattr(self, "_is_animating", False):
-            return
-        self._is_animating = True
-
-        grid_layout = self.main_content.grid_layout
-        old_btns = []
-        for i in range(grid_layout.count()):
-            w = grid_layout.itemAt(i).widget()
-            if isinstance(w, (AppButton, GroupButton)):
-                old_btns.append(w)
-
-        if not next_page_items:
-            for btn in old_btns:
-                safe_delete_widget(btn)
-            self._is_animating = False
-            return
-
-        screen_width = self.width()
-        speed = self.page_anim_speed  # slider 可调速度
-        anim_group_out = QParallelAnimationGroup(self)
-
-        for btn in old_btns:
-            if sip.isdeleted(btn):
-                continue
-            start_pos = btn.pos()
-            if direction == "left":
-                end_pos = QPoint(-btn.width(), start_pos.y())
-                distance = start_pos.x() + btn.width()
-            else:
-                end_pos = QPoint(screen_width + btn.width(), start_pos.y())
-                distance = screen_width - start_pos.x() + btn.width()
-            duration = max(80, int(distance / max(1000, speed) * 1000))
-            duration = min(duration, 350)  # 关键：强制上限，避免“超长等待”
-            anim = QPropertyAnimation(btn, b"pos", self)
-            anim.setDuration(duration)
-            anim.setStartValue(start_pos)
-            anim.setEndValue(end_pos)
-            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-            anim_group_out.addAnimation(anim)
-
-        def cleanup_old_btns():
-            for btn in old_btns:
-                safe_delete_widget(btn)
-            # 动画结束后再统一刷新本页（next_page_items: [('group'|'app', obj), ...]）
-            self.display_apps([obj for typ, obj in next_page_items if typ == 'app'], self.current_page)
-            self._is_animating = False
-
-        anim_group_out.finished.connect(cleanup_old_btns)
-        anim_group_out.start()
-        self.anim = anim_group_out  # 防止被回收
+    def copy_ai_apps_setup(self):
+        """The lines an AI app's MCP settings take (the bridge: this program with --mcp-stdio), to the clipboard."""
+        import app_mcp_host
+        QGuiApplication.clipboard().setText(app_mcp_host.bridge_setup_json())
+        raspberry_ui.raspberry_alert(self, self.tr(
+            "The setup is copied. Paste it into the MCP settings of your AI app (for example Claude Desktop or Cursor). "
+            "The AI app can then use the tools of Raspberry and of your other apps on this Mac."),
+            self.tr("Use in other AI apps"))
 
     def backup_groups(self):
+        self.write_backup()
+        # 提示
+        msg = CustomMessageBox(self.tr("Backup completed!"), parent=self, buttons=(self.tr("OK"),))
+        msg.exec()
+
+    def write_backup(self):
+        """The backup itself, without the notice (the menu and an assistant app's tool both use it).
+        Returns the new backup folder."""
         # 备份目录
-        backup_base = Path.home() / "Library/Application Support/com.ryanthehito.raspberry/RaspberryAppPath/Backups"
+        backup_base = Path(BACKUPS_DIR)
         backup_base.mkdir(parents=True, exist_ok=True)
         # 时间戳文件夹
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -5878,9 +6892,12 @@ class LaunchpadWindow(QWidget):
             Path(APP_ORDER_FILE),
             Path(APP_PATHS_FILE),
             Path(MAIN_ORDER_FILE),
+            Path(DISPLAY_NAME_MAP_FILE),
+            Path(ALIAS_NAME_MAP_FILE),
+            Path(HIDDEN_APPS_FILE),
         ]
         icon_cache_src = Path(ICON_CACHE_DIR)
-        icon_cache_dst = backup_dir / ".launchpad_icon_cache"
+        icon_cache_dst = backup_dir / "icon_cache"
 
         # 复制文件
         for f in files:
@@ -5889,15 +6906,11 @@ class LaunchpadWindow(QWidget):
         # 复制文件夹
         if icon_cache_src.exists():
             shutil.copytree(icon_cache_src, icon_cache_dst, dirs_exist_ok=True)
-
-        # 提示
-        msg = CustomMessageBox(self.tr("Backup completed!"), parent=self, buttons=(self.tr("OK"),))
-        msg.exec()
+        return backup_dir
 
     def restore_backup(self):
         # 选择备份文件夹
-        backup_base = str(
-            Path.home() / "Library/Application Support/com.ryanthehito.raspberry/RaspberryAppPath/Backups")
+        backup_base = str(BACKUPS_DIR)
         dialog = QFileDialog(self)
         dialog.setFileMode(QFileDialog.FileMode.Directory)
         dialog.setDirectory(backup_base)
@@ -5907,28 +6920,27 @@ class LaunchpadWindow(QWidget):
             selected_dirs = dialog.selectedFiles()
             if selected_dirs:
                 backup_dir = Path(selected_dirs[0])
-                # 检查文件
-                files = [
-                    ".launchpad_groups.json",
-                    ".launchpad_app_order.json",
-                    ".launchpad_app_paths.json",
-                    ".launchpad_main_order.json",
-                    ".raspberry_display_names.json",
-                    ".raspberry_alias_names.json",
-                ]
-                icon_cache_src = backup_dir / ".launchpad_icon_cache"
-                required = files[:4]  # 前四个是必需
-                missing_required = [f for f in required if not (backup_dir / f).exists()]
+                # a backup made before the data moved holds the files under their old names
+                # (".launchpad_groups.json" …), a newer one under today's ("groups.json" …): both restore
+                wanted = [(new, old) for old, new in LEGACY_DATA_FILES[:6]] + [(HIDDEN_APPS_FILE, None)]
+                found = {}
+                for new, old in wanted:
+                    for name in (os.path.basename(new), old):
+                        if name and (backup_dir / name).exists():
+                            found[new] = backup_dir / name
+                            break
+                missing_required = [os.path.basename(new) for new, _old in wanted[:4] if new not in found]
                 if missing_required:
                     msg = CustomMessageBox(self.tr(f"Missing files: %n").replace('%n', ', '.join(missing_required)), parent=self, buttons=(self.tr("OK"),))
                     msg.exec()
                     return
                 # 覆盖文件
-                for f in files:
-                    src = backup_dir / f
-                    if src.exists():
-                        shutil.copy2(src, Path.home() / f"{f}")
+                for new, src in found.items():
+                    shutil.copy2(src, new)
                 # 覆盖 icon cache
+                icon_cache_src = backup_dir / "icon_cache"
+                if not icon_cache_src.exists():
+                    icon_cache_src = backup_dir / LEGACY_ICON_CACHE
                 icon_cache_dst = Path(ICON_CACHE_DIR)
                 if icon_cache_src.exists():
                     # 先删除原有
@@ -5967,50 +6979,20 @@ class LaunchpadWindow(QWidget):
                     self.restart_app()
 
     def adapt_to_screen(self):
+        """Take the screen the mouse is on. True = the icons were laid out here (never now: the
+        caller does it)."""
         screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
         geo: QRect = screen.geometry()
-        screen_width = geo.width()
-        screen_height = geo.height()
-        screen_key = f"{screen.name() or 'Unknown'}|{screen_width}x{screen_height}"
-
-        geometry_changed = geo != self.geometry()
-        key_changed = (self._last_screen_key != screen_key)
-
-        # 命中缓存时：仅同步几何（如有需要），并通过 check_and_apply_compact_mode 用缓存直接刷新一次
-        cache = load_display_profile_cache()
-        if screen_key in cache:
-            if geometry_changed:
-                self.setGeometry(geo)
-                self.main_content.setGeometry(self.rect())
-                if self.group_widget and self.group_widget.isVisible():
-                    gw = self.group_widget
-                    gw.move((self.width() - gw.width()) // 2,
-                            (self.height() - gw.height()) // 2)
-            self._last_screen_width = screen_width
-            self._last_screen_key = screen_key
-            rendered = self.check_and_apply_compact_mode()  # 利用缓存直接应用/刷新
-            return bool(rendered)
-
-        if geometry_changed:
+        if geo != self.geometry():
             self.setGeometry(geo)
             self.main_content.setGeometry(self.rect())
             if self.group_widget and self.group_widget.isVisible():
-                gw = self.group_widget
-                gw.move((self.width() - gw.width()) // 2,
-                        (self.height() - gw.height()) // 2)
-        # 屏幕信息发生变化（包含分辨率或屏幕名称）时才重新计算/应用
-        already_rendered = False
-        if key_changed or self._last_screen_width != screen_width or geometry_changed:
-            self._last_screen_width = screen_width
-            self._last_screen_key = screen_key
-            already_rendered = self.check_and_apply_compact_mode()
-        if geometry_changed and not already_rendered:
-            self.display_apps(self.filtered_apps, self.current_page)
-        return bool(already_rendered)
+                QTimer.singleShot(0, self.refit_group_panel)
+        return False
 
     def change_language(self, code):
         # 1) 记录到配置
-        cfg_file = Path.home() / ".raspberry_lang"
+        cfg_file = Path(LANG_FILE)
         cfg_file.write_text(code, encoding="utf-8")
         # 2) 提示用户重启
         msg = RestartMessageBox(self.tr("Language will apply after restart."),
@@ -6043,12 +7025,7 @@ class LaunchpadWindow(QWidget):
 
     def reset_all_data_and_restart(self):
         # 需要删除的文件列表
-        files_to_delete = [
-            os.path.expanduser("~/.launchpad_main_order.json"),
-            os.path.expanduser("~/.launchpad_groups.json"),
-            os.path.expanduser("~/.launchpad_app_paths.json"),
-            os.path.expanduser("~/.launchpad_app_order.json"),
-        ]
+        files_to_delete = [MAIN_ORDER_FILE, GROUPS_FILE, APP_PATHS_FILE, APP_ORDER_FILE]
         for f in files_to_delete:
             try:
                 if os.path.exists(f):
@@ -6106,46 +7083,20 @@ class LaunchpadWindow(QWidget):
             pass
 
     @pyqtSlot(str)
-    def on_update_available(self, latest: str):
-        # 这里只在主线程里创建窗口或弹窗
-        # 你可以复用已有的 WindowUpdate 或者弹一个你的自定义对话框
-        # 例：用你已有的 RestartMessageBox/CustomMessageBox 风格
-        msg = CustomMessageBox(
-            self.tr(f"New version %n is available. Open release note page?").replace('%n', latest),
-            parent=self,
-            buttons=(self.tr("Open"), self.tr("Later"))
-        )
-        res = msg.exec()
-        if res == 0:
-            webbrowser.open('https://github.com/Ryan-the-hito/Raspberry/releases')
-
-        # 或者你也可以这样：仅在有更新时展示现有的 WindowUpdate 小窗
-        #self.win_update.show()  # 它会 show() 并 checkupdate()，但建议只 show，然后把 latest 显示出来
-
-    @pyqtSlot(str)
-    def on_update_checked_ok(self, latest: str):
-        # 可选：比如在日志里记录或更新某个状态标签（主线程里的标签）
-        #print(f"Checked latest: {latest}")
-        pass
-
-    @pyqtSlot(str)
-    def on_update_checked_error(self, err: str):
-        # 可选：记录错误，不弹框打扰用户
-        #print(f"Check update error: {err}")
-        pass
-
     def _clear_main_grid(self):
         grid_layout = self.main_content.grid_layout
         # 清布局里的
         for i in reversed(range(grid_layout.count())):
             w = grid_layout.itemAt(i).widget()
             if w:
+                w.hide()            # first: else Qt's pending "show" makes it a window of its own
                 w.setParent(None)
                 w.deleteLater()
         # 保险：再清 grid_widget 的子控件
         for w in self.main_content.grid_widget.findChildren(QWidget):
             if w is self.main_content.grid_widget:
                 continue
+            w.hide()            # first: else Qt's pending "show" makes it a window of its own
             w.setParent(None)
             w.deleteLater()
 
@@ -6250,7 +7201,7 @@ class LaunchpadWindow(QWidget):
         self.write_keyboard_mode_setting(self.new_keyboard_mode)
 
     def read_keyboard_mode_setting(self):
-        path = os.path.expanduser("~/.raspberry_keyboard_mode")
+        path = setting_path("keyboard_mode")
         try:
             if os.path.exists(path):
                 return open(path, "r", encoding="utf-8").read().strip() != "0"
@@ -6260,7 +7211,7 @@ class LaunchpadWindow(QWidget):
         return True
 
     def write_keyboard_mode_setting(self, enabled: bool):
-        path = os.path.expanduser("~/.raspberry_keyboard_mode")
+        path = setting_path("keyboard_mode")
         try:
             with open(path, "w", encoding="utf-8") as f:
                 f.write("1" if enabled else "0")
@@ -6272,7 +7223,7 @@ class LaunchpadWindow(QWidget):
         self.write_clear_search_on_close_setting(self.clear_search_on_close)
 
     def read_clear_search_on_close_setting(self):
-        path = os.path.expanduser("~/.raspberry_clear_search_on_close")
+        path = setting_path("clear_search_on_close")
         try:
             if os.path.exists(path):
                 return open(path, "r", encoding="utf-8").read().strip() == "1"
@@ -6282,7 +7233,7 @@ class LaunchpadWindow(QWidget):
         return False
 
     def write_clear_search_on_close_setting(self, enabled: bool):
-        path = os.path.expanduser("~/.raspberry_clear_search_on_close")
+        path = setting_path("clear_search_on_close")
         try:
             with open(path, "w", encoding="utf-8") as f:
                 f.write("1" if enabled else "0")
@@ -6292,11 +7243,78 @@ class LaunchpadWindow(QWidget):
     def toggle_compact_mode(self):
         self.compact_mode = self.compact_mode_action.isChecked()
         self.write_compact_mode_setting(self.compact_mode)
+        before = self._grid_snapshot() if self.isVisible() else None
         self.display_apps(self.filtered_apps, self.current_page)
+        if before is not None:          # the icons slide together / apart
+            self._settle_grid()
+            self._animate_reflow(before)
+
+    # ── "Show on all Spaces" (learnt from Broccoli's main window) ──
+    def read_all_spaces_setting(self):
+        try:
+            return open(setting_path("show_on_all_spaces"), "r", encoding="utf-8").read().strip() == "1"
+        except Exception:
+            return False        # off, as in Broccoli
+
+    def write_all_spaces_setting(self, enabled: bool):
+        try:
+            with open(setting_path("show_on_all_spaces"), "w", encoding="utf-8") as f:
+                f.write("1" if enabled else "0")
+        except Exception:
+            pass
+
+    def _native_ns_window(self):
+        """This window's NSWindow (None before it exists / off the Mac screen)."""
+        if sys.platform != 'darwin' or QGuiApplication.platformName() != 'cocoa':
+            return None
+        if not self.testAttribute(Qt.WidgetAttribute.WA_WState_Created):
+            return None
+        try:
+            return objc.objc_object(c_void_p=int(self.winId())).window()
+        except Exception:
+            return None
+
+    def apply_show_on_all_spaces(self, enabled=None) -> bool:
+        """On: the launcher is on every Space (it follows when you switch) and can open over another
+        app's full-screen Space. Off: it stays on the Space it was opened on. Set on the NSWindow, so
+        it is set again at every show."""
+        if enabled is not None:
+            self._show_on_all_spaces = bool(enabled)
+        return raspberry_ui.apply_space_behavior(self._native_ns_window(), self._show_on_all_spaces)
+
+    def mark_windows_at_birth(self) -> bool:
+        """At the start, while Raspberry has no Dock icon yet: the launcher and the windows that live as
+        long as it does (update, About, guide) get their marks now — these reach other apps'
+        full-screen Spaces. Returns whether that was done."""
+        if not self._show_on_all_spaces or dock_icon_shown():
+            return False
+        done = self.apply_show_on_all_spaces()
+        for name in ('win_update', 'win_about', 'win_permission'):
+            window = getattr(self, name, None)
+            if window is not None:
+                window.winId()                    # its system window is made now
+                raspberry_ui.follow_all_spaces(window)
+        self._spaces_marks_from_birth = bool(done)
+        return self._spaces_marks_from_birth
+
+    def toggle_show_on_all_spaces(self, checked=None):
+        enabled = bool(self.all_spaces_action.isChecked())
+        self.write_all_spaces_setting(enabled)
+        self.apply_show_on_all_spaces(enabled)
+        raspberry_ui.set_all_spaces(enabled)      # the windows opened beside it follow
+        # marks switched on while the Dock icon is there reach the other desktops, not full-screen
+        # apps; the ones from the start are gone as soon as the switch was off once
+        self._spaces_marks_from_birth = False
+        if enabled:
+            self.ask_restart_for_full_screen()
+
+    def ask_restart_for_full_screen(self):
+        RestartMessageBox(self.tr("Show on all Spaces is on.\nTo open over full-screen apps too, Raspberry will restart."),
+                          parent=self, buttons=(self.tr("OK"), self.tr("Later"))).exec()
 
     # 仅保存 bool，别保存边距
     def read_compact_mode_setting(self):
-        path = os.path.expanduser("~/.raspberry_compact_mode")
+        path = setting_path("compact_mode")
         try:
             if os.path.exists(path):
                 return open(path, "r", encoding="utf-8").read().strip() == "1"
@@ -6305,7 +7323,7 @@ class LaunchpadWindow(QWidget):
         return False
 
     def write_compact_mode_setting(self, enabled: bool):
-        path = os.path.expanduser("~/.raspberry_compact_mode")
+        path = setting_path("compact_mode")
         try:
             with open(path, "w", encoding="utf-8") as f:
                 f.write("1" if enabled else "0")
@@ -6331,73 +7349,72 @@ class LaunchpadWindow(QWidget):
         return idx
 
     def on_drop_reorder_in_main(self, app_path: str, slot_index_on_page: int):
-        """
-        在当前页 slot_index_on_page 处插入 app（仅限 apps 段），保证：所有 group 在前。
-        允许跨页（slot 索引为“页内索引”）
-        """
-        # 找源 app
-        src_app = None
-        for a in self.apps:
-            if a['path'] == app_path:
-                src_app = a
-                break
-        if not src_app:
+        """An app's icon was dropped between two icons of the page on screen: it goes there (among the
+        apps: the grid keeps a page's groups in front, see AppGridWidget). With separate pages it now
+        belongs to this page. While searching nothing is sorted."""
+        if self._is_searching():
             return
-
-        # 计算目标“页内 -> 全局 apps 段”位置
-        page_start = self.current_page * self.items_per_page
-        # 当前页 items（含 group + app 或仅 app）
-        is_searching = bool(self.main_content.search_bar.text().strip())
-        if is_searching:
-            page_items = [('app', a) for a in self.filtered_apps[page_start:page_start + self.items_per_page]]
+        if app_path.startswith(GROUP_DRAG_PREFIX):
+            self.on_drop_group_in_main(app_path[len(GROUP_DRAG_PREFIX):], slot_index_on_page)
+            return
+        src_app = next((a for a in self.apps if a['path'] == app_path), None)
+        old_index = next((i for i, (typ, obj) in enumerate(self.main_order) if typ == 'app' and obj is src_app), None)
+        if src_app is None or old_index is None:
+            return
+        before = self._grid_snapshot() if self.isVisible() else None
+        page = self.current_page
+        start = self.page_start(page)
+        target = start + max(0, int(slot_index_on_page))
+        del self.main_order[old_index]
+        if old_index < target:
+            target -= 1
+        if old_index < start:
+            start -= 1
+        if self.pages_are_separate():
+            on_page = sum(1 for _typ, obj in self.main_order if obj.get('_page') == page)
         else:
-            page_items = self.main_order[page_start:page_start + self.items_per_page]
+            on_page = max(0, min(self.items_per_page, len(self.main_order) - start))
+        target = max(start, min(target, start + on_page, len(self.main_order)))
+        if self.pages_are_separate():
+            src_app['_page'] = page
+        self.main_order.insert(target, ('app', src_app))
+        self._after_main_order_changed(before)
 
-        # 求出当前页内 apps 段的“起始全局索引”
-        first_app_global = self._first_app_global_index()
-        # 计算 slot_index_on_page 相对于“page_start”的偏移，转成全局 slot
-        target_global_slot = page_start + slot_index_on_page
-
-        # 约束：不能落到 groups 段
-        if target_global_slot < first_app_global:
-            target_global_slot = first_app_global
-
-        # 将“目标全局 slot”转换为“目标在 apps 段中的绝对插入索引”
-        apps_global_positions = [i for i, (typ, obj) in enumerate(self.main_order) if typ == 'app']
-        if not apps_global_positions:
-            # 当前没有 apps：追加到 group 之后
-            insert_pos_global = first_app_global
-        else:
-            # 根据 target_global_slot 定位 apps 段中的插入位置（前驱/后继）
-            insert_pos_global = first_app_global
-            for gi in apps_global_positions:
-                if gi < target_global_slot:
-                    insert_pos_global = gi + 1
-
-        # 从 main_order 中移除源 app
-        self.main_order = [(typ, obj) for (typ, obj) in self.main_order if not (typ == 'app' and obj is src_app)]
-        # 重新计算“现在”的 first_app_global（移除后 groups 段长度不变）
-        first_app_global = self._first_app_global_index()
-        last_app_global = self._last_app_global_index()
-        if insert_pos_global < first_app_global:
-            insert_pos_global = first_app_global
-        if last_app_global >= 0 and insert_pos_global > last_app_global + 1:
-            insert_pos_global = last_app_global + 1
-
-        # 插入
-        self.main_order.insert(insert_pos_global, ('app', src_app))
-        self.save_current_order()
-
-        # 维护 filtered_apps：保证未分组 apps 的列表顺序与 main_order 中 apps 顺序一致
-        ordered_paths = [obj['path'] for typ, obj in self.main_order if typ == 'app']
-        path_to_app = {a['path']: a for a in self.apps if a['path'] in ordered_paths}
-        self.filtered_apps = [path_to_app[p] for p in ordered_paths if p in path_to_app]
-
-        # 刷新当前页
-        self.display_apps(self.filtered_apps, self.current_page)
+    def on_drop_group_in_main(self, group_name: str, slot_index_on_page: int):
+        """A group's icon was dropped between two icons of the page on screen: it goes there, among
+        the groups standing first (groups stay in front of the apps). With separate pages it now
+        belongs to this page."""
+        old_index = next((i for i, (typ, obj) in enumerate(self.main_order)
+                          if typ == 'group' and obj['name'] == group_name), None)
+        if old_index is None:
+            return
+        group = self.main_order[old_index][1]
+        before = self._grid_snapshot() if self.isVisible() else None
+        page = self.current_page
+        start = self.page_start(page)
+        target = start + max(0, int(slot_index_on_page))
+        del self.main_order[old_index]
+        if old_index < target:
+            target -= 1
+        if old_index < start:
+            start -= 1
+        if self.pages_are_separate():
+            end = start
+            while end < len(self.main_order) and self.main_order[end][0] == 'group' \
+                    and self.main_order[end][1].get('_page') == page:
+                end += 1
+            group['_page'] = page
+        else:                                   # one long row: all the groups stand first
+            end = 0
+            while end < len(self.main_order) and self.main_order[end][0] == 'group':
+                end += 1
+            start = min(start, end)
+        target = max(start, min(target, end))
+        self.main_order.insert(target, ('group', group))
+        self._after_main_order_changed(before)
 
     def read_anim_speed_setting(self):
-        path = os.path.expanduser("~/.raspberry_anim_speed")
+        path = setting_path("anim_speed")
         try:
             if os.path.exists(path):
                 return int(open(path, "r", encoding="utf-8").read().strip())
@@ -6406,7 +7423,7 @@ class LaunchpadWindow(QWidget):
         return 8000  # 默认值
 
     def write_anim_speed_setting(self, val):
-        path = os.path.expanduser("~/.raspberry_anim_speed")
+        path = setting_path("anim_speed")
         try:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(str(val))
@@ -6417,121 +7434,6 @@ class LaunchpadWindow(QWidget):
         self.page_anim_speed = val
         self.anim_speed_value_label.setText(str(val))
         self.write_anim_speed_setting(val)
-
-    def _on_touchpad_swipe_release(self):
-        page_w = self.main_content.grid_widget.width()
-        threshold = page_w // 2
-        accum = self._touchpad_swipe_accum
-        direction = self._touchpad_swipe_direction
-        btns = self._touchpad_swipe_btns
-
-        # 新增：首末页判断
-        is_first_page = self.current_page == 0
-        is_last_page = self.current_page == self.total_pages() - 1
-
-        # 如果是首页且向右滑（accum>0），只允许滑动四分之一页
-        if is_first_page and accum > 0:
-            max_accum = page_w // 4
-            if accum > max_accum:
-                accum = max_accum
-            # 回弹动画
-            group = QParallelAnimationGroup(self)
-            for btn in btns:
-                if sip.isdeleted(btn):
-                    continue
-                orig = getattr(btn, "_orig_pos", btn.pos())
-                anim = QPropertyAnimation(btn, b"pos", self)
-                anim.setDuration(200)
-                anim.setStartValue(btn.pos())
-                anim.setEndValue(orig)
-                anim.setEasingCurve(QEasingCurve.Type.InBounce)
-                group.addAnimation(anim)
-            group.start()
-            self._touchpad_swipe_anim = group
-            # 清理状态
-            self._touchpad_swipe_active = False
-            self._touchpad_swipe_accum = 0
-            self._touchpad_swipe_direction = None
-            self._touchpad_swipe_btns = []
-            return
-
-        # 如果是末页且向左滑（accum<0），只允许滑动四分之一页
-        if is_last_page and accum < 0:
-            min_accum = -page_w // 4
-            if accum < min_accum:
-                accum = min_accum
-            # 回弹动画
-            group = QParallelAnimationGroup(self)
-            for btn in btns:
-                if sip.isdeleted(btn):
-                    continue
-                orig = getattr(btn, "_orig_pos", btn.pos())
-                anim = QPropertyAnimation(btn, b"pos", self)
-                anim.setDuration(200)
-                anim.setStartValue(btn.pos())
-                anim.setEndValue(orig)
-                anim.setEasingCurve(QEasingCurve.Type.InBounce)
-                group.addAnimation(anim)
-            group.start()
-            self._touchpad_swipe_anim = group
-            # 清理状态
-            self._touchpad_swipe_active = False
-            self._touchpad_swipe_accum = 0
-            self._touchpad_swipe_direction = None
-            self._touchpad_swipe_btns = []
-            return
-
-        # 正常翻页逻辑
-        if abs(accum) < threshold:
-            # 回弹
-            group = QParallelAnimationGroup(self)
-            for btn in btns:
-                if sip.isdeleted(btn):
-                    continue
-                orig = getattr(btn, "_orig_pos", btn.pos())
-                anim = QPropertyAnimation(btn, b"pos", self)
-                anim.setDuration(200)
-                anim.setStartValue(btn.pos())
-                anim.setEndValue(orig)
-                anim.setEasingCurve(QEasingCurve.Type.InBounce)
-                group.addAnimation(anim)
-            group.start()
-            self._touchpad_swipe_anim = group
-        else:
-            # 继续补完翻页距离（从当前位置继续）
-            if direction == "left":
-                target_page = min(self.current_page + 1, self.total_pages() - 1)
-                remaining = -page_w - accum
-            else:
-                target_page = max(self.current_page - 1, 0)
-                remaining = page_w - accum
-
-            group = QParallelAnimationGroup(self)
-            for btn in btns:
-                if sip.isdeleted(btn):
-                    continue
-                anim = QPropertyAnimation(btn, b"pos", self)
-                anim.setDuration(200)
-                anim.setStartValue(btn.pos())
-                anim.setEndValue(btn.pos() + QPoint(remaining, 0))
-                anim.setEasingCurve(QEasingCurve.Type.InBounce)
-                group.addAnimation(anim)
-
-            # 动画开始时就刷新页面
-            def on_anim_start():
-                self.goto_page(target_page)
-
-            group.stateChanged.connect(
-                lambda new, old: on_anim_start() if new == QAbstractAnimation.State.Running else None
-            )
-            group.start()
-            self._touchpad_swipe_anim = group
-
-        # 清理状态
-        self._touchpad_swipe_active = False
-        self._touchpad_swipe_accum = 0
-        self._touchpad_swipe_direction = None
-        self._touchpad_swipe_btns = []
 
     def goto_page_immediate(self, page: int):
         total_pages = self.total_pages()
@@ -6546,156 +7448,18 @@ class LaunchpadWindow(QWidget):
         # 立刻上新，无过场
         self.display_apps(self.filtered_apps, self.current_page)
 
-    def read_auto_compact_mode_setting(self):
-        path = os.path.expanduser("~/.raspberry_auto_compact_mode")
-        try:
-            if os.path.exists(path):
-                return open(path, "r", encoding="utf-8").read().strip() == "1"
-        except Exception:
-            pass
-        return True  # 默认自动
-
-    def write_auto_compact_mode_setting(self, enabled: bool):
-        path = os.path.expanduser("~/.raspberry_auto_compact_mode")
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write("1" if enabled else "0")
-        except Exception:
-            pass
-
-    def toggle_auto_compact_mode(self):
-        enabled = self.auto_compact_mode_action.isChecked()
-        self.write_auto_compact_mode_setting(enabled)
-        # 立即判断一次
-        rendered = self.check_and_apply_compact_mode()
-        if not rendered:
-            self.display_apps(self.filtered_apps, self.current_page)
-
-    def check_and_apply_compact_mode(self):
-        if not self.read_auto_compact_mode_setting():
-            return False
-
-        screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
-        cache = load_display_profile_cache()
-        cache_key = None
-        screen_name = "Unknown"
-        screen_width = screen_height = 0
-
-        if screen:
-            geo = screen.geometry()
-            screen_name = screen.name() or "Unknown"
-            screen_width = geo.width()
-            screen_height = geo.height()
-            cache_key = f"{screen_name}|{screen_width}x{screen_height}"
-            cached_profile = cache.get(cache_key)
-            # 如果有缓存，直接应用，不再计算
-            if cached_profile and "compact_mode" in cached_profile:
-                self.compact_mode = bool(cached_profile.get("compact_mode", False))
-                self.compact_mode_action.setChecked(self.compact_mode)
-                self.write_compact_mode_setting(self.compact_mode)
-                self.display_apps(self.filtered_apps, self.current_page)
-                return True
-
-        # 先用正常模式布局
-        self.compact_mode = False
-        self.compact_mode_action.setChecked(False)
-        self.write_compact_mode_setting(False)
-        self.display_apps(self.filtered_apps, self.current_page)
-        QApplication.processEvents()  # 强制刷新布局
-        gap_normal = self.get_actual_icon_gap()
-
-        # 再用紧凑模式布局
-        self.compact_mode = True
-        self.compact_mode_action.setChecked(True)
-        self.write_compact_mode_setting(True)
-        self.display_apps(self.filtered_apps, self.current_page)
-        QApplication.processEvents()
-        gap_compact = self.get_actual_icon_gap()
-
-        # 比较实际间距
-        if gap_compact > gap_normal:
-            # 紧凑模式间距反而更大，关闭紧凑模式
-            self.compact_mode = False
-            self.compact_mode_action.setChecked(False)
-            self.write_compact_mode_setting(False)
-            self.display_apps(self.filtered_apps, self.current_page)
-        else:
-            # 紧凑模式间距更小，保持紧凑模式
-            self.compact_mode = True
-            self.compact_mode_action.setChecked(True)
-            self.write_compact_mode_setting(True)
-            self.display_apps(self.filtered_apps, self.current_page)
-
-        if cache_key:
-            cache[cache_key] = {
-                "screen_name": screen_name,
-                "width": screen_width,
-                "height": screen_height,
-                "compact_mode": self.compact_mode,
-                "updated_at": datetime.datetime.now().isoformat()
-            }
-            save_display_profile_cache(cache)
-        return True
-
-    def get_actual_icon_gap(self):
-        grid_layout = self.main_content.grid_layout
-        btns = []
-        for i in range(grid_layout.count()):
-            w = grid_layout.itemAt(i).widget()
-            if isinstance(w, (AppButton, GroupButton)):
-                btns.append(w)
-        if len(btns) < 2:
-            return 0
-        # 取第一个和第二个按钮的 x 坐标
-        x0 = btns[0].pos().x()
-        x1 = btns[1].pos().x()
-        return x1 - x0
-
 
 class WindowAbout(QWidget):  # 增加说明页面(About)
     def __init__(self):
         super().__init__()
-        self.radius = 16  # 圆角半径，可按 macOS 15 或 26 设置为 16~26
-
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.Window |
-            Qt.WindowType.WindowStaysOnTopHint
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
-
         self.init_ui()
+        make_native_glass_window(self)   # system traffic lights + window glass (style book 5.7.2)
 
     def init_ui(self):
         self.setUpMainWindow()
         self.setFixedSize(400, 600)
         self.center()
         self.setFocus()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-
-        rect = QRectF(self.rect())
-        path = QPainterPath()
-        path.addRoundedRect(rect, self.radius, self.radius)
-
-        painter.setClipPath(path)
-        bg_color = self.palette().color(QPalette.ColorRole.Window)
-        painter.fillPath(path, bg_color)
-
-    # 让无边框窗口可拖动
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            event.accept()
-
-    def mouseMoveEvent(self, event):
-        if event.buttons() == Qt.MouseButton.LeftButton:
-            self.move(event.globalPosition().toPoint() - self.drag_pos)
-            event.accept()
 
     def setUpMainWindow(self):
         # 添加关闭按钮（仿 macOS 左上角红色圆点）
@@ -6715,9 +7479,6 @@ class WindowAbout(QWidget):  # 增加说明页面(About)
         # self.close_button.clicked.connect(self.close)
         # 三个按钮
         ##FF5F57
-        self.close_button = MacWindowButton("#FF605C", "x", self)
-        self.close_button.move(10, 10)
-        self.close_button.clicked.connect(self.close)
         ##FFBD2E
         # self.min_button = MacWindowButton("#FFBD44", "-", self)
         # self.min_button.move(30, 10)
@@ -6939,7 +7700,8 @@ class CustomDialog(QDialog):  # (About1)
         self.center()
         self.resize(440, 390)
         self.setFocus()
-        self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint)
+        make_native_glass_window(self, kind=Qt.WindowType.Dialog)
+        self.setFixedSize(440, 430)
 
     def setUpMainWindow(self):
         widge_all = QWidget()
@@ -7013,7 +7775,8 @@ class CustomDialog2(QDialog):  # (About2)
         self.center()
         self.resize(440, 390)
         self.setFocus()
-        self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint)
+        make_native_glass_window(self, kind=Qt.WindowType.Dialog)
+        self.setFixedSize(440, 430)
 
     def setUpMainWindow(self):
         widge_all = QWidget()
@@ -7087,7 +7850,8 @@ class CustomDialog3(QDialog):  # (About3)
         self.center()
         self.resize(440, 390)
         self.setFocus()
-        self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint)
+        make_native_glass_window(self, kind=Qt.WindowType.Dialog)
+        self.setFixedSize(440, 430)
 
     def setUpMainWindow(self):
         widge_all = QWidget()
@@ -7161,7 +7925,8 @@ class CustomDialog4(QDialog):  # (About4)
         self.center()
         self.resize(440, 390)
         self.setFocus()
-        self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint)
+        make_native_glass_window(self, kind=Qt.WindowType.Dialog)
+        self.setFixedSize(440, 430)
 
     def setUpMainWindow(self):
         widge_all = QWidget()
@@ -7224,119 +7989,651 @@ class CustomDialog4(QDialog):  # (About4)
         self.close()
 
 
-class WindowUpdate(QWidget):  # 增加更新页面（Check for Updates）
-    def __init__(self):
-        super().__init__()
-        self.radius = 16  # 圆角半径，可按 macOS 15 或 26 设置为 16~26
+# ---- One-click in-app update: download → verify → install → relaunch (Broccoli's, 2026-11-18;
+# Ryan: 「有没有和 broccoli 一样做更新机制？想做成一样的」) ----
+# Every release ships one notarized DMG on GitHub (the asset's `digest` = its sha256).
+#  1. WindowUpdate downloads it into ~/Library/Caches/com.ryanthehito.raspberry/Updates with a progress
+#     bar (a .part file, resumed with an HTTP Range request), then checks size + sha256.
+#  2. It mounts the DMG read-only ("Y" answers a licence agreement), copies Raspberry.app into a hidden
+#     folder NEXT TO the running bundle (same volume → the swap is a rename) and requires the copy to
+#     satisfy RASPBERRY_UPDATE_CODE_REQUIREMENT (Developer ID + this team + this bundle id).
+#  3. Raspberry quits normally. AFTER app.exec() returns, this process swaps the bundles (macOS App
+#     Management lets an app modify apps signed by its own Team ID). Groups, order and settings live
+#     outside the app (Application Support/<bundle id>), so the swap keeps them.
+#  4. A detached waiter reopens the app once this PID is gone; the new build deletes the previous
+#     bundle on its first start and reports the result.
+def _ut(text: str) -> str:
+    """The update texts, all in WindowUpdate's translation context."""
+    return QCoreApplication.translate("WindowUpdate", text)
 
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.Window |
-            Qt.WindowType.WindowStaysOnTopHint
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
 
-        self.init_ui()
+RASPBERRY_UPDATE_LATEST_API = 'https://api.github.com/repos/Ryan-the-hito/Raspberry/releases/latest'
+RASPBERRY_UPDATE_RELEASES_URL = 'https://github.com/Ryan-the-hito/Raspberry/releases'
+RASPBERRY_UPDATE_BUNDLE_ID = BUNDLE_ID
+RASPBERRY_UPDATE_TEAM_ID = '49C7YMHM5Q'
+RASPBERRY_UPDATE_CODE_REQUIREMENT = (
+    'anchor apple generic and identifier "%s"'
+    ' and certificate 1[field.1.2.840.113635.100.6.2.6] exists'      # Developer ID CA
+    ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'  # Developer ID Application
+    ' and certificate leaf[subject.OU] = "%s"' % (RASPBERRY_UPDATE_BUNDLE_ID, RASPBERRY_UPDATE_TEAM_ID))
+RASPBERRY_UPDATE_CACHE_DIR = os.path.join(CACHE_DIR, 'Updates')
+RASPBERRY_UPDATE_RESULT_PATH = os.path.join(RASPBERRY_UPDATE_CACHE_DIR, 'last_install.json')
+RASPBERRY_UPDATE_STAGING_DIRNAME = '.Raspberry-update'
+RASPBERRY_UPDATE_SPARE_BYTES = 512 * 1024 * 1024   # free space kept beyond the copy itself
+_RASPBERRY_UPDATE_FS_LOCK = threading.Lock()   # staging vs. the startup cleanup of the same folder
+_RASPBERRY_PENDING_UPDATE_INSTALL = None        # set right before quitting for an install
 
-    def init_ui(self):
-        self.setUpMainWindow()
-        self.setFixedSize(280, 220)
-        self.center()
-        self.setFocus()
+
+class RaspberryUpdateError(Exception):
+    """A user-presentable reason the update stopped (already translated)."""
+
+
+class RaspberryUpdateCanceled(RaspberryUpdateError):
+    pass
+
+
+def raspberry_parse_version(text):
+    match = re.search(r'(\d+)\.(\d+)\.(\d+)', str(text or ''))
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def raspberry_is_newer_version(candidate, current) -> bool:
+    newer, older = raspberry_parse_version(candidate), raspberry_parse_version(current)
+    return bool(newer and older and newer > older)
+
+
+def raspberry_running_app_bundle():
+    """The .app bundle this process runs from (packaged builds only)."""
+    if not getattr(sys, 'frozen', False):
+        return None
+    try:
+        bundle = Path(sys.executable).resolve().parents[2]
+    except Exception:
+        return None
+    if bundle.suffix != '.app' or not (bundle / 'Contents' / 'Info.plist').is_file():
+        return None
+    return bundle
+
+
+def raspberry_update_install_blocker(bundle) -> str:
+    """Why this copy cannot replace itself ('' when it can)."""
+    if sys.platform != 'darwin':
+        return _ut('automatic install needs macOS')
+    if bundle is None:
+        return _ut('Raspberry is not running from an installed app')
+    if '/AppTranslocation/' in str(bundle):
+        return _ut('macOS is running Raspberry from a temporary copy; move it into Applications first')
+    # renaming the bundle into another folder needs write access to it and its parent
+    if not os.access(str(bundle.parent), os.W_OK) or not os.access(str(bundle), os.W_OK):
+        return _ut('no permission to replace {path}').format(path=str(bundle))
+    return ''
+
+
+def raspberry_fetch_latest_release():
+    """Latest release from the GitHub API: tag, version and its DMG asset
+    (dmg_* fields stay empty when the release carries no DMG)."""
+    import requests
+    response = requests.get(RASPBERRY_UPDATE_LATEST_API, timeout=(4, 6),
+                            headers={'Accept': 'application/vnd.github+json'})
+    if not response.ok:
+        return None
+    data = response.json() or {}
+    tag = str(data.get('tag_name', '') or '').strip()
+    if not re.fullmatch(r'v\d+\.\d+\.\d+', tag):
+        return None
+    info = {'tag': tag, 'version': tag[1:], 'dmg_name': '', 'dmg_url': '', 'dmg_size': 0, 'dmg_sha256': ''}
+    dmgs = [asset for asset in (data.get('assets') or []) if isinstance(asset, dict)
+            and str(asset.get('name', '')).lower().endswith('.dmg')
+            and str(asset.get('state', 'uploaded')) == 'uploaded'
+            and str(asset.get('browser_download_url', '')).startswith('https://')]
+    dmgs.sort(key=lambda asset: not str(asset.get('name', '')).lower().startswith('raspberry'))
+    if dmgs:
+        asset = dmgs[0]
+        digest = str(asset.get('digest') or '')
+        info.update(dmg_name=str(asset.get('name')),
+                    dmg_url=str(asset.get('browser_download_url')),
+                    dmg_size=int(asset.get('size') or 0),
+                    dmg_sha256=digest[7:].lower() if digest.lower().startswith('sha256:') else '')
+    return info
+
+
+def _raspberry_sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for block in iter(lambda: handle.read(4 << 20), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _raspberry_update_file_matches(path: str, size: int, sha256: str) -> bool:
+    try:
+        if size and os.path.getsize(path) != size:
+            return False
+        return not sha256 or _raspberry_sha256_file(path) == sha256
+    except OSError:
+        return False
+
+
+def raspberry_download_update_dmg(info: dict, progress, cancel_event, status=None) -> str:
+    """Download the release DMG into the cache (resuming an earlier .part), verify size + sha256 and
+    return its path. progress(done, total) and status(text) run on the calling worker thread;
+    cancel_event aborts between chunks and keeps the .part for the next attempt."""
+    status = status or (lambda _text: None)
+    url = str(info.get('dmg_url') or '')
+    if not url:
+        raise RaspberryUpdateError(_ut('This release has no installer package.'))
+    size = int(info.get('dmg_size') or 0)
+    sha256 = str(info.get('dmg_sha256') or '').lower()
+    os.makedirs(RASPBERRY_UPDATE_CACHE_DIR, exist_ok=True)
+    name = re.sub(r'[^A-Za-z0-9._-]+', '_', str(info.get('dmg_name') or '')).strip('.') or 'Raspberry-update.dmg'
+    final_path = os.path.join(RASPBERRY_UPDATE_CACHE_DIR, name)
+    part_path = final_path + '.part'
+    if os.path.isfile(final_path):
+        status(_ut('Verifying the download…'))
+        if _raspberry_update_file_matches(final_path, size, sha256):
+            return final_path
+        os.remove(final_path)
+    have = os.path.getsize(part_path) if os.path.isfile(part_path) else 0
+    if size and have > size:
+        os.remove(part_path)
+        have = 0
+    if not size or have < size:
+        headers = {'Range': 'bytes=%d-' % have} if have else {}
+        import requests
+        try:
+            with requests.get(url, stream=True, timeout=(10, 60), headers=headers) as response:
+                if have and response.status_code == 206:
+                    mode = 'ab'
+                elif response.status_code == 200:
+                    mode, have = 'wb', 0
+                else:
+                    raise RaspberryUpdateError(
+                        _ut('Download failed (HTTP {code}).').format(code=response.status_code))
+                total = size or (have + int(response.headers.get('Content-Length') or 0))
+                progress(have, total)
+                with open(part_path, mode) as handle:
+                    for chunk in response.iter_content(chunk_size=1 << 20):
+                        if cancel_event.is_set():
+                            raise RaspberryUpdateCanceled(_ut('Download canceled.'))
+                        if chunk:
+                            handle.write(chunk)
+                            have += len(chunk)
+                            progress(have, total)
+        except RaspberryUpdateError:
+            raise
+        except Exception as exc:
+            if cancel_event.is_set():
+                raise RaspberryUpdateCanceled(_ut('Download canceled.')) from exc
+            raise RaspberryUpdateError(_ut('Download interrupted: {err}').format(err=exc)) from exc
+    status(_ut('Verifying the download…'))
+    if not _raspberry_update_file_matches(part_path, size, sha256):
+        try:
+            os.remove(part_path)
+        except OSError:
+            pass
+        raise RaspberryUpdateError(_ut('The download is damaged (checksum mismatch). Please try again.'))
+    os.replace(part_path, final_path)
+    return final_path
+
+
+def _raspberry_attach_dmg(dmg_path: str, mountpoint: str) -> None:
+    env = dict(os.environ, PAGER='/bin/cat')
+    commands = (
+        ['/usr/bin/hdiutil', 'attach', '-nobrowse', '-readonly', '-noautoopen', '-noverify',
+         '-mountpoint', mountpoint, dmg_path],
+        # hdiutil is deprecated from macOS 27 on; diskutil image is its successor
+        ['/usr/sbin/diskutil', 'image', 'attach', '--mountOptions', 'nobrowse', '--readOnly',
+         '--mountPoint', mountpoint, dmg_path],
+    )
+    for command in commands:
+        if not os.path.exists(command[0]):
+            continue
+        try:
+            # a release DMG may show a licence agreement before mounting; "Y" accepts it
+            subprocess.run(command, input=b'Y\n', capture_output=True, timeout=300, env=env)
+        except Exception:
+            continue
+        if os.path.ismount(mountpoint):
+            return
+    raise RaspberryUpdateError(_ut('Could not open the downloaded installer.'))
+
+
+def _raspberry_detach_dmg(mountpoint: str) -> None:
+    for command in (['/usr/bin/hdiutil', 'detach', mountpoint, '-quiet'],
+                    ['/usr/bin/hdiutil', 'detach', mountpoint, '-force', '-quiet'],
+                    ['/usr/sbin/diskutil', 'eject', mountpoint]):
+        if not os.path.ismount(mountpoint):
+            break
+        if not os.path.exists(command[0]):
+            continue
+        try:
+            subprocess.run(command, capture_output=True, timeout=60)
+        except Exception:
+            pass
+    if not os.path.ismount(mountpoint):
+        try:
+            os.rmdir(mountpoint)
+        except OSError:
+            pass
+
+
+def _raspberry_bundle_info(bundle) -> dict:
+    try:
+        with open(Path(bundle) / 'Contents' / 'Info.plist', 'rb') as handle:
+            data = plistlib.load(handle)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _raspberry_tree_size(root) -> int:
+    total = 0
+    for folder, _dirs, files in os.walk(str(root)):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(folder, name)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def raspberry_verify_update_bundle(bundle) -> str:
+    """Return the bundle's version once its whole signature satisfies
+    RASPBERRY_UPDATE_CODE_REQUIREMENT; raise RaspberryUpdateError otherwise."""
+    info = _raspberry_bundle_info(bundle)
+    if info.get('CFBundleIdentifier') != RASPBERRY_UPDATE_BUNDLE_ID:
+        raise RaspberryUpdateError(_ut('The installer does not contain Raspberry.'))
+    try:
+        result = subprocess.run(['/usr/bin/codesign', '--verify', '--deep', '--strict',
+                                 '-R=' + RASPBERRY_UPDATE_CODE_REQUIREMENT, str(bundle)],
+                                capture_output=True, timeout=900)
+    except Exception as exc:
+        raise RaspberryUpdateError(_ut('Could not check the signature: {err}').format(err=exc)) from exc
+    if result.returncode != 0:
+        logging.warning('Update bundle rejected by codesign: %s',
+                        result.stderr.decode('utf-8', 'replace')[-800:])
+        raise RaspberryUpdateError(
+            _ut('The update is not signed by the Raspberry developer, so it was not installed.'))
+    return str(info.get('CFBundleShortVersionString') or '')
+
+
+def raspberry_stage_update(dmg_path: str, target, status=None) -> dict:
+    """Copy the DMG's Raspberry.app into <target's folder>/.Raspberry-update and verify the copy.
+    Returns the pending-install record applied after the event loop ends
+    (raspberry_apply_pending_update_install)."""
+    import tempfile
+    status = status or (lambda _text: None)
+    target = Path(target)
+    staging_root = target.parent / RASPBERRY_UPDATE_STAGING_DIRNAME
+    staged = staging_root / target.name
+    with _RASPBERRY_UPDATE_FS_LOCK:
+        try:
+            if staging_root.exists():
+                shutil.rmtree(staging_root, ignore_errors=True)
+            staging_root.mkdir(parents=True, exist_ok=True)
+            os.makedirs(RASPBERRY_UPDATE_CACHE_DIR, exist_ok=True)
+            mountpoint = tempfile.mkdtemp(prefix='mnt-', dir=RASPBERRY_UPDATE_CACHE_DIR)
+            try:
+                status(_ut('Opening the installer…'))
+                _raspberry_attach_dmg(dmg_path, mountpoint)
+                source = next((entry for entry in sorted(Path(mountpoint).iterdir())
+                               if entry.suffix == '.app' and entry.is_dir() and not entry.is_symlink()
+                               and _raspberry_bundle_info(entry).get('CFBundleIdentifier') == RASPBERRY_UPDATE_BUNDLE_ID),
+                              None)
+                if source is None:
+                    raise RaspberryUpdateError(_ut('The installer does not contain Raspberry.'))
+                # the copy sits next to the installed app until the swap: room for it first
+                need = _raspberry_tree_size(source) + RASPBERRY_UPDATE_SPARE_BYTES
+                free = shutil.disk_usage(str(staging_root)).free
+                if free < need:
+                    raise RaspberryUpdateError(
+                        _ut('Not enough disk space: the update needs about {need} GB free ({free} GB now).').format(
+                            need='%.1f' % (need / 1e9), free='%.1f' % (free / 1e9)))
+                status(_ut('Copying the new version…'))
+                copied = subprocess.run(['/usr/bin/ditto', str(source), str(staged)],
+                                        capture_output=True, timeout=1800)
+                if copied.returncode != 0 or not staged.is_dir():
+                    raise RaspberryUpdateError(_ut('Could not copy the new version: {err}').format(
+                        err=copied.stderr.decode('utf-8', 'replace').strip()[-300:]))
+            finally:
+                _raspberry_detach_dmg(mountpoint)
+            subprocess.run(['/usr/bin/xattr', '-dr', 'com.apple.quarantine', str(staged)],
+                           capture_output=True, timeout=300)
+            status(_ut('Checking the developer signature…'))
+            version = raspberry_verify_update_bundle(staged)
+            if raspberry_is_newer_version(VERSION, version):
+                raise RaspberryUpdateError(
+                    _ut('The installer holds an older version (v{v}); nothing was changed.').format(v=version))
+        except Exception as exc:
+            shutil.rmtree(staging_root, ignore_errors=True)
+            if isinstance(exc, RaspberryUpdateError):
+                raise
+            raise RaspberryUpdateError(_ut('Could not prepare the update: {err}').format(err=exc)) from exc
+    return {'target': str(target), 'staged': str(staged),
+            'backup': str(staging_root / ('previous-' + target.name)),
+            'version': version, 'dmg': str(dmg_path)}
+
+
+def _raspberry_write_update_result(record: dict) -> None:
+    try:
+        os.makedirs(RASPBERRY_UPDATE_CACHE_DIR, exist_ok=True)
+        with open(RASPBERRY_UPDATE_RESULT_PATH, 'w', encoding='utf-8') as handle:
+            json.dump(record, handle, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def raspberry_take_last_update_result() -> dict:
+    """The record the previous run left after an install attempt (read once)."""
+    try:
+        with open(RASPBERRY_UPDATE_RESULT_PATH, 'r', encoding='utf-8') as handle:
+            record = json.load(handle)
+    except Exception:
+        return {}
+    try:
+        os.remove(RASPBERRY_UPDATE_RESULT_PATH)
+    except OSError:
+        pass
+    return record if isinstance(record, dict) else {}
+
+
+def _raspberry_spawn_relauncher(app_path: str) -> None:
+    """Reopen app_path once this process has exited (force-kill after ~60 s if it hangs).
+    Double-forked: the waiter is reparented to launchd."""
+    waiter = ('pid=$1; app=$2; n=0; '
+              'while kill -0 "$pid" 2>/dev/null; do '
+              'n=$((n+1)); if [ "$n" -ge 300 ]; then kill -9 "$pid" 2>/dev/null; sleep 1; break; fi; '
+              'sleep 0.2; done; sleep 0.5; /usr/bin/open "$app"')
+    try:
+        subprocess.Popen(['/bin/sh', '-c', '(' + waiter + ') </dev/null >/dev/null 2>&1 &',
+                         'raspberry-relaunch', str(os.getpid()), str(app_path)],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True, close_fds=True).wait(timeout=10)
+    except Exception:
+        pass
+
+
+def raspberry_apply_pending_update_install() -> None:
+    """Runs as Raspberry quits: swap the staged bundle in, record the outcome, schedule the relaunch
+    (Raspberry's files live outside the app: nothing to carry). A failed rename rolls back and reopens
+    the old build, which then shows the reason (WindowUpdate's startup note).
+    Called from the app delegate's applicationWillTerminate_ — Raspberry's own delegate (Dock clicks)
+    replaces Qt's, so on Quit macOS ends the process right after that call and app.exec() never returns
+    (found 2026-11-22: the install placed after app.exec() never ran). Once only."""
+    global _RASPBERRY_PENDING_UPDATE_INSTALL
+    pending = _RASPBERRY_PENDING_UPDATE_INSTALL
+    _RASPBERRY_PENDING_UPDATE_INSTALL = None
+    if not pending:
+        return
+    target, staged, backup = Path(pending['target']), Path(pending['staged']), Path(pending['backup'])
+    record = {'status': 'failed', 'version': str(pending.get('version') or ''), 'previous': VERSION,
+              'dmg': str(pending.get('dmg') or ''), 'reason': '', 'time': time.time()}
+    try:
+        # exit hooks (pending writes) run now, while every file of the running build is still in place
+        atexit._run_exitfuncs()
+    except Exception:
+        pass
+    launch = target
+    try:
+        if not staged.is_dir():
+            raise FileNotFoundError(str(staged))
+        if backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
+        os.rename(target, backup)
+        try:
+            os.rename(staged, target)
+        except OSError:
+            try:
+                os.rename(backup, target)
+            except OSError:
+                launch = backup
+            raise
+        record['status'] = 'installed'
+    except Exception as exc:
+        record['reason'] = '%s: %s' % (type(exc).__name__, exc)
+    _raspberry_write_update_result(record)
+    _raspberry_spawn_relauncher(str(launch))
+
+
+def raspberry_cleanup_update_leftovers() -> None:
+    """Startup (background thread): drop the previous bundle kept by the last swap or a stale staged
+    copy, stale mounts, and cached installers this build has already reached. A failed install keeps
+    its DMG for the retry."""
+    with _RASPBERRY_UPDATE_FS_LOCK:
+        bundle = raspberry_running_app_bundle()
+        if bundle is not None:
+            staging_root = bundle.parent / RASPBERRY_UPDATE_STAGING_DIRNAME
+            if staging_root.is_dir():
+                shutil.rmtree(staging_root, ignore_errors=True)
+        if not os.path.isdir(RASPBERRY_UPDATE_CACHE_DIR):
+            return
+        for name in os.listdir(RASPBERRY_UPDATE_CACHE_DIR):
+            path = os.path.join(RASPBERRY_UPDATE_CACHE_DIR, name)
+            try:
+                if name.startswith('mnt-') and os.path.isdir(path):
+                    _raspberry_detach_dmg(path)
+                elif name.endswith(('.dmg', '.dmg.part')) and not raspberry_is_newer_version(name, VERSION):
+                    os.remove(path)
+            except Exception:
+                pass
+
+
+class _UpdateProgressBar(QWidget):
+    """Slim rounded track for the update window. busy=True sweeps an indeterminate segment
+    (mount / copy / signature check have no percentage). (Broccoli's, unchanged.)"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._fraction = 0.0
+        self._busy = False
+        self._phase = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(30)
+        self._timer.timeout.connect(self._advance)
+        self.setFixedHeight(6)
+
+    def fraction(self) -> float:
+        return self._fraction
+
+    def is_busy(self) -> bool:
+        return self._busy
+
+    def set_fraction(self, fraction: float):
+        self._busy = False
+        self._timer.stop()
+        self._fraction = max(0.0, min(1.0, float(fraction)))
+        self.update()
+
+    def set_busy(self, busy: bool = True):
+        self._busy = bool(busy)
+        if self._busy and self.isVisible():
+            self._timer.start()
+        else:
+            self._timer.stop()
+        self.update()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._busy:
+            self._timer.start()
+
+    def hideEvent(self, event):
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def _advance(self):
+        self._phase = (self._phase + 0.015) % 1.0
+        self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-
         rect = QRectF(self.rect())
-        path = QPainterPath()
-        path.addRoundedRect(rect, self.radius, self.radius)
+        radius = rect.height() / 2.0
+        dark = raspberry_ui.ui_palette()['dark']
+        track = QPainterPath()
+        track.addRoundedRect(rect, radius, radius)
+        painter.fillPath(track, QColor('#3A3A3C') if dark else QColor('#E5E5EA'))
+        if self._busy:
+            segment = rect.width() * 0.3
+            fill_rect = QRectF(rect.left() - segment + (rect.width() + segment) * self._phase,
+                               rect.top(), segment, rect.height())
+        else:
+            fill_rect = QRectF(rect.left(), rect.top(), rect.width() * self._fraction, rect.height())
+        if fill_rect.width() > 0:
+            fill = QPainterPath()
+            fill.addRoundedRect(fill_rect, radius, radius)
+            painter.setClipPath(track)
+            painter.fillPath(fill, QColor('#0A84FF') if dark else QColor('#007AFF'))
 
-        painter.setClipPath(path)
-        bg_color = self.palette().color(QPalette.ColorRole.Window)
-        painter.fillPath(path, bg_color)
 
-    # 让无边框窗口可拖动
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            event.accept()
+class _UpdateStatusLabel(QLabel):
+    """The update window's status line; tells the window when its text changes (the window shows the
+    line only while it says something, and fits its height to it)."""
+    text_changed = None
 
-    def mouseMoveEvent(self, event):
-        if event.buttons() == Qt.MouseButton.LeftButton:
-            self.move(event.globalPosition().toPoint() - self.drag_pos)
-            event.accept()
+    def setText(self, text):
+        super().setText(text)
+        if callable(self.text_changed):
+            self.text_changed()
+
+
+class WindowUpdate(QWidget):  # 增加更新页面（Check for Updates）
+    """Broccoli's update window (2026-11-09, same layout and size: 320 wide, as tall as its content): the
+    release check runs in a background thread, and
+    "Update Now" downloads, verifies and installs the new version, then relaunches Raspberry."""
+    # (result_text, update_ready, popup_when_ready, release_info) from the fetch thread.
+    update_check_finished = pyqtSignal(str, bool, bool, object)
+    # one-click install worker → GUI thread
+    install_progress = pyqtSignal(object, object)   # (done_bytes, total_bytes)
+    install_status = pyqtSignal(str)                # a phase without percentage
+    install_failed = pyqtSignal(str)
+    install_ready = pyqtSignal(object)              # pending-install record
+
+    def __init__(self):
+        super().__init__()
+        self._check_inflight = False
+        self._release_info = None
+        self._update_available = False
+        self._install_busy = False
+        self._install_can_cancel = False
+        self._install_cancel = None
+        self._download_started_at = 0.0
+        self._download_started_bytes = 0
+        self._startup_note = self._read_startup_note()
+        self.update_check_finished.connect(self._on_update_check_finished)
+        self.install_progress.connect(self._on_install_progress)
+        self.install_status.connect(self._on_install_status)
+        self.install_failed.connect(self._on_install_failed)
+        self.install_ready.connect(self._on_install_ready)
+        self.initUI()
+
+    def initUI(self):  # 说明页面内信息
+        self.setUpMainWindow()
+        make_native_glass_window(self)   # system traffic lights + window glass (style book 5.7.2)
+        QWidget.layout(self).setContentsMargins(20, glass_kit.NATIVE_TITLEBAR_HEIGHT, 20, 20)
+        self.setFixedWidth(320)   # Broccoli's update window
+        self._fit_height()
+        self.center()
+        self.setFocus()
+
+    def _fit_height(self):
+        """As tall as the content: no empty band at the bottom. While a download runs the progress bar
+        and the status line appear under the buttons and the window grows by that much."""
+        layout = QWidget.layout(self)
+        if layout is None:
+            return
+        busy = not self.install_progress_bar.isHidden() or bool(self.install_status_lbl.text().strip())
+        self._progress_block.setVisible(busy)
+        layout.activate()
+        width = self.width() or 320
+        height = layout.totalHeightForWidth(width) if layout.hasHeightForWidth() else layout.totalSizeHint().height()
+        self.setFixedHeight(max(1, int(height)))
 
     def setUpMainWindow(self):
-        # 添加关闭按钮（仿 macOS 左上角红色圆点）
-        # self.close_button = QPushButton(self)
-        # self.close_button.setFixedSize(12, 12)
-        # self.close_button.move(10, 10)
-        # self.close_button.setStyleSheet("""
-        #     QPushButton {
-        #         background-color: #FF5F57;
-        #         border-radius: 6px;
-        #         border: none;
-        #     }
-        #     QPushButton:hover {
-        #         background-color: #BF4943;
-        #     }
-        # """)
-        # self.close_button.clicked.connect(self.close)
-        self.close_button = MacWindowButton("#FF605C", "x", self)
-        self.close_button.move(10, 10)
-        self.close_button.clicked.connect(self.close)
-
-        title = QLabel(self.tr("<h2>Raspberry Update</h2>"))
+        # Broccoli's update window: centred lines, then one row per action sharing a label column
+        title = QLabel(_ut("<h2>Raspberry Update</h2>"), self)
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
+        self.lbl = QLabel(_ut('Current version: v{v}').format(v=VERSION), self)
+        self.lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
         widg5 = QWidget()
-        lbl1 = QLabel(self.tr('Latest version:'), self)
+        lbl1 = QLabel(_ut('Latest version:'), self)
         self.lbl2 = QLabel('', self)
         blay5 = QHBoxLayout()
         blay5.setContentsMargins(0, 0, 0, 0)
-        # blay5.addStretch()
+        blay5.setSpacing(4)
+        blay5.addStretch(1)
         blay5.addWidget(lbl1)
         blay5.addWidget(self.lbl2)
-        blay5.addStretch()
+        blay5.addStretch(1)
         widg5.setLayout(blay5)
 
-        widg3 = QWidget()
-        self.lbl = QLabel(self.tr(f'Current version: v%n').replace('%n', VERSION), self)
-        blay3 = QHBoxLayout()
-        blay3.setContentsMargins(0, 0, 0, 0)
-        # blay3.addStretch()
-        blay3.addWidget(self.lbl)
-        blay3.addStretch()
-        widg3.setLayout(blay3)
-
-        widg4 = QWidget()
-        widg4.setFixedHeight(50)
-        lbl0 = QLabel(self.tr('Check release:'), self)
-        bt1 = WhiteButton('Github')
+        lbl0 = QLabel(_ut('Check release:'), self)
+        bt1 = WhiteButton(_ut('Github'))
+        bt1.setFixedWidth(120)
         bt1.clicked.connect(self.upd)
-        blay4 = QHBoxLayout()
-        blay4.setContentsMargins(0, 0, 0, 0)
-        # blay4.addStretch()
-        blay4.addWidget(lbl0)
-        blay4.addWidget(bt1)
-        blay4.addStretch()
-        widg4.setLayout(blay4)
+        # one-click update: download with progress → verify → install → relaunch
+        lbl_install = QLabel(_ut('Install update:'), self)
+        self.install_btn = WhiteButton(_ut('Update Now'))
+        self.install_btn.setFixedWidth(120)
+        self.install_btn.setEnabled(False)
+        self.install_btn.clicked.connect(self.start_install)
+        label_width = max(lbl0.sizeHint().width(), lbl_install.sizeHint().width())
+        action_rows = []
+        for label, button in ((lbl0, bt1), (lbl_install, self.install_btn)):
+            label.setFixedWidth(label_width)
+            label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            row = QWidget()
+            row.setFixedHeight(50)   # About's button rows
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(12)
+            row_layout.addStretch(1)
+            row_layout.addWidget(label)
+            row_layout.addWidget(button)
+            row_layout.addStretch(1)
+            action_rows.append(row)
+
+        # progress bar + status line: only while there is something to show
+        self._progress_block = QWidget()
+        progress_layout = QVBoxLayout(self._progress_block)
+        progress_layout.setContentsMargins(0, 6, 0, 0)
+        progress_layout.setSpacing(10)
+        self.install_progress_bar = _UpdateProgressBar(self._progress_block)
+        self.install_progress_bar.hide()
+        self.install_status_lbl = _UpdateStatusLabel(self._progress_block)
+        self.install_status_lbl.setWordWrap(True)
+        self.install_status_lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        self.install_status_lbl.text_changed = lambda: QTimer.singleShot(0, self._fit_height)
+        progress_layout.addWidget(self.install_progress_bar)
+        progress_layout.addWidget(self.install_status_lbl)
+        self.install_progress_bar.installEventFilter(self)
+        self._progress_block.hide()
 
         main_h_box = QVBoxLayout()
-        main_h_box.setContentsMargins(20, 40, 20, 20)  # 重要，用来保证关闭按钮的位置。
+        main_h_box.setContentsMargins(20, glass_kit.NATIVE_TITLEBAR_HEIGHT, 20, 20)
+        main_h_box.addSpacing(10)
         main_h_box.addWidget(title)
         main_h_box.addSpacing(5)
-        main_h_box.addWidget(widg5)
+        main_h_box.addWidget(self.lbl)
         main_h_box.addSpacing(5)
-        main_h_box.addWidget(widg3)
-        main_h_box.addWidget(widg4)
+        main_h_box.addWidget(widg5)
+        main_h_box.addSpacing(16)
+        for row in action_rows:
+            main_h_box.addWidget(row)
+        main_h_box.addWidget(self._progress_block)
+        main_h_box.addSpacing(10)
         self.setLayout(main_h_box)
 
     def upd(self):
-        webbrowser.open('https://github.com/Ryan-the-hito/Raspberry/releases')
+        webbrowser.open(RASPBERRY_UPDATE_RELEASES_URL)
+
+    def eventFilter(self, obj, event):
+        if obj is getattr(self, 'install_progress_bar', None) and event.type() in (QEvent.Type.Show, QEvent.Type.Hide):
+            QTimer.singleShot(0, self._fit_height)
+        return super().eventFilter(obj, event)
 
     def center(self):  # 设置窗口居中
         qr = self.frameGeometry()
@@ -7348,67 +8645,201 @@ class WindowUpdate(QWidget):  # 增加更新页面（Check for Updates）
         self.show()
         self.checkupdate()
 
-    def checkupdate(self):
-        targetURL = 'https://github.com/Ryan-the-hito/Raspberry/releases'
+    @staticmethod
+    def _read_startup_note() -> str:
+        """What the previous run's install attempt left behind, shown once with the startup check."""
+        record = raspberry_take_last_update_result()
+        if record.get('status') == 'installed' and not raspberry_is_newer_version(record.get('version'), VERSION):
+            return _ut('Raspberry was updated to v{v}.').format(v=VERSION)
+        if record.get('status') == 'failed':
+            return _ut('The last update could not be installed ({reason}). Click Update Now to try again.').format(
+                reason=str(record.get('reason') or '?'))
+        return ''
+
+    def checkupdate(self, *, popup_when_ready: bool = False):
+        """Start the release check WITHOUT touching the network on the GUI thread (the old check
+        fetched github.com right here and froze the window while GitHub was slow or unreachable)."""
+        if self._check_inflight:
+            return
+        self._check_inflight = True
+        self.lbl2.setText(_ut('Checking…'))
+        self.lbl2.adjustSize()
+
+        def worker():
+            alertupdate = _ut('No Internet')
+            ready = False
+            info = None
+            try:
+                info = self.fetch_latest_release_info()
+                result = (info or {}).get('tag')
+                if result:
+                    # only a strictly NEWER release is an update (the old check offered any release
+                    # that differed — a newer build was offered a "downgrade")
+                    if raspberry_is_newer_version(result, VERSION):
+                        alertupdate = _ut('{tag} is ready!').format(tag=result)
+                        ready = True
+                    else:
+                        alertupdate = _ut('{tag} (up-to-date)').format(tag=result)
+            except Exception:
+                pass
+            try:
+                self.update_check_finished.emit(alertupdate, ready, popup_when_ready, info)
+            except RuntimeError:
+                pass   # window destroyed during shutdown
+
+        threading.Thread(target=worker, daemon=True, name='raspberry-update-check').start()
+
+    def _on_update_check_finished(self, alertupdate: str, ready: bool, popup_when_ready: bool, info):
+        self._check_inflight = False
+        self.lbl2.setText(str(alertupdate or ''))
+        self.lbl2.adjustSize()
+        if not self._install_busy:
+            self._update_available = bool(ready)
+            self._release_info = dict(info) if (ready and isinstance(info, dict)) else None
+            has_package = bool((self._release_info or {}).get('dmg_url'))
+            self.install_btn.setEnabled(has_package)
+            if ready and not has_package:
+                self.install_status_lbl.setText(_ut('This release has no installer package; use the Github button.'))
+        note = self._startup_note if popup_when_ready else ''
+        if note and not self._install_busy:
+            self._startup_note = ''
+            self.install_status_lbl.setText(note)
+        if popup_when_ready and (ready or note) and not self.isVisible():
+            self.show()
+
+    # ---- one-click install ----------------------------------------------------
+    def start_install(self):
+        if self._install_busy:
+            # the same button reads "Cancel" while the download runs
+            if self._install_can_cancel and self._install_cancel is not None:
+                self._install_cancel.set()
+                self.install_btn.setEnabled(False)
+                self.install_status_lbl.setText(_ut('Canceling…'))
+            return
+        info = dict(self._release_info or {})
+        if not info.get('dmg_url'):
+            return
+        self._install_busy = True
+        self._install_can_cancel = True
+        self._install_cancel = threading.Event()
+        self._download_started_at = 0.0
+        self._download_started_bytes = 0
+        self.install_btn.setText(_ut('Cancel'))
+        self.install_progress_bar.set_fraction(0.0)
+        self.install_progress_bar.show()
+        self.install_status_lbl.setText(_ut('Connecting…'))
+        threading.Thread(target=self._install_worker, args=(info, self._install_cancel),
+                         daemon=True, name='raspberry-update-install').start()
+
+    def _install_worker(self, info: dict, cancel_event):
+        last_emit = [0.0]
+
+        def progress(done, total):
+            now = time.monotonic()
+            if now - last_emit[0] >= 0.1 or (total and done >= total):
+                last_emit[0] = now
+                self.install_progress.emit(int(done), int(total))
+
         try:
-            # Fetch the HTML content from the URL
-            urllib3.disable_warnings()
-            logging.captureWarnings(True)
-            s = requests.session()
-            s.keep_alive = False  # 关闭多余连接
-            response = s.get(targetURL, verify=False)
-            response.encoding = 'utf-8'
-            html_content = response.text
-            # Parse the HTML using BeautifulSoup
-            soup = BeautifulSoup(html_content, "html.parser")
-            # Remove all images from the parsed HTML
-            for img in soup.find_all("img"):
-                img.decompose()
-            # Convert the parsed HTML to plain text using html2text
-            text_maker = html2text.HTML2Text()
-            text_maker.ignore_links = True
-            text_maker.ignore_images = True
-            plain_text = text_maker.handle(str(soup))
-            # Convert the plain text to UTF-8
-            plain_text_utf8 = plain_text.encode(response.encoding).decode("utf-8")
+            dmg_path = raspberry_download_update_dmg(info, progress, cancel_event,
+                                                      status=self.install_status.emit)
+            bundle = raspberry_running_app_bundle()
+            blocker = raspberry_update_install_blocker(bundle)
+            if blocker:
+                # can't swap this copy: hand the verified DMG to Finder instead
+                subprocess.Popen(['/usr/bin/open', dmg_path],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self.install_ready.emit({'manual': True, 'reason': blocker, 'dmg': dmg_path})
+                return
+            self.install_ready.emit(raspberry_stage_update(dmg_path, bundle, status=self.install_status.emit))
+        except RaspberryUpdateError as exc:
+            self.install_failed.emit(str(exc))
+        except Exception as exc:
+            logging.exception('One-click update failed.')
+            self.install_failed.emit(_ut('Update failed: {err}').format(err=exc))
 
-            for i in range(10):
-                plain_text_utf8 = plain_text_utf8.replace('\n\n\n\n', '\n\n')
-                plain_text_utf8 = plain_text_utf8.replace('\n\n\n', '\n\n')
-                plain_text_utf8 = plain_text_utf8.replace('   ', ' ')
-                plain_text_utf8 = plain_text_utf8.replace('  ', ' ')
+    def _on_install_progress(self, done, total):
+        done, total = int(done or 0), int(total or 0)
+        now = time.monotonic()
+        if not self._download_started_at:
+            self._download_started_at, self._download_started_bytes = now, done
+        mb = 1024 * 1024
+        text = _ut('Downloading… {done} / {total} MB').format(
+            done='%.1f' % (done / mb), total=('%.1f' % (total / mb)) if total else '?')
+        elapsed = now - self._download_started_at
+        if elapsed >= 1.0 and done > self._download_started_bytes:
+            text += ' · %.1f MB/s' % ((done - self._download_started_bytes) / mb / elapsed)
+        self.install_progress_bar.set_fraction(done / total if total else 0.0)
+        if not (self._install_cancel is not None and self._install_cancel.is_set()):
+            self.install_status_lbl.setText(text)
 
-            pattern2 = re.compile(r'(v\d+\.\d+\.\d+)\sLatest')
-            result = pattern2.findall(plain_text_utf8)
-            result = ''.join(result)
-            nowversion = 'v' + VERSION
-            if result == nowversion:
-                alertupdate = result + self.tr(' (up-to-date)')
-                self.lbl2.setText(alertupdate)
-                self.lbl2.adjustSize()
-            else:
-                alertupdate = result + self.tr(' is ready!')
-                self.lbl2.setText(alertupdate)
-                self.lbl2.adjustSize()
-        except:
-            alertupdate = self.tr('No Intrenet')
-            self.lbl2.setText(alertupdate)
-            self.lbl2.adjustSize()
+    def _on_install_status(self, text: str):
+        # verify / mount / copy / signature: no percentage and no way back
+        self._install_can_cancel = False
+        self.install_btn.setEnabled(False)
+        self.install_btn.setText(_ut('Installing…'))
+        self.install_progress_bar.set_busy(True)
+        self.install_status_lbl.setText(str(text or ''))
+
+    def _reset_install_controls(self):
+        self._install_busy = False
+        self._install_can_cancel = False
+        self._install_cancel = None
+        self.install_progress_bar.set_busy(False)
+        self.install_progress_bar.hide()
+        self.install_btn.setText(_ut('Update Now'))
+        self.install_btn.setEnabled(self._update_available and bool((self._release_info or {}).get('dmg_url')))
+
+    def _on_install_failed(self, message: str):
+        self._reset_install_controls()
+        self.install_status_lbl.setText(str(message or ''))
+        if not self.isVisible():
+            self.show()
+
+    def _on_install_ready(self, pending):
+        pending = dict(pending or {})
+        if pending.get('manual'):
+            self._reset_install_controls()
+            self.install_status_lbl.setText(
+                _ut("Can't install automatically ({reason}). The installer is open: drag Raspberry into Applications.")
+                .format(reason=pending.get('reason', '')))
+            return
+        global _RASPBERRY_PENDING_UPDATE_INSTALL
+        _RASPBERRY_PENDING_UPDATE_INSTALL = pending
+        self.install_progress_bar.set_fraction(1.0)
+        self.install_status_lbl.setText(_ut('Restarting Raspberry to finish the update…'))
+        if not self.isVisible():
+            self.show()
+        QTimer.singleShot(800, self._quit_for_install)
+
+    def _quit_for_install(self):
+        # the event loop ends; the swap itself runs after app.exec() returns
+        QApplication.instance().quit()
+
+    @classmethod
+    def fetch_latest_release_info(cls):
+        """Release info (tag + DMG asset) from the API; when the API is unavailable, the tag alone from
+        the releases page (no one-click install then — the Github button still works)."""
+        try:
+            info = raspberry_fetch_latest_release()
+            if info:
+                return info
+        except Exception:
+            pass
+        tag = cls.extract_latest_tag(cls.fetch_latest_version_text())
+        return {'tag': tag} if tag else None
 
     @staticmethod
     def fetch_latest_version_text():
-        # 返回页面纯文本，或直接返回最新版本字符串
-        targetURL = 'https://github.com/Ryan-the-hito/Raspberry/releases'
         try:
-            urllib3.disable_warnings()
-            logging.captureWarnings(True)
+            import requests
+            from bs4 import BeautifulSoup
+            import html2text
             s = requests.session()
             s.keep_alive = False
-            response = s.get(targetURL, verify=False, timeout=15)
+            response = s.get(RASPBERRY_UPDATE_RELEASES_URL, timeout=(4, 8))
             response.encoding = 'utf-8'
-            html_content = response.text
-
-            soup = BeautifulSoup(html_content, "html.parser")
+            soup = BeautifulSoup(response.text, "html.parser")
             for img in soup.find_all("img"):
                 img.decompose()
             text_maker = html2text.HTML2Text()
@@ -7416,7 +8847,6 @@ class WindowUpdate(QWidget):  # 增加更新页面（Check for Updates）
             text_maker.ignore_images = True
             plain_text = text_maker.handle(str(soup))
             plain_text_utf8 = plain_text.encode(response.encoding).decode("utf-8")
-
             for _ in range(10):
                 plain_text_utf8 = (plain_text_utf8
                                    .replace('\n\n\n\n', '\n\n')
@@ -7428,61 +8858,45 @@ class WindowUpdate(QWidget):  # 增加更新页面（Check for Updates）
             return None
 
     @staticmethod
-    def extract_latest_tag(plain_text_utf8: str) -> str | None:
-        # 返回类似 'v0.0.12' 的字符串
+    def extract_latest_tag(plain_text_utf8):
         if not plain_text_utf8:
             return None
-        pattern2 = re.compile(r'(v\d+\.\d+\.\d+)\sLatest')
-        result = pattern2.findall(plain_text_utf8)
-        if result:
-            return result[0]
-        return None
+        result = re.compile(r'(v\d+\.\d+\.\d+)\sLatest').findall(plain_text_utf8)
+        return result[0] if result else None
+
+
+
+def announce_data_move(parent=None):
+    """Said once, after the first start that moved Raspberry's files out of the home folder (Ryan
+    2026-11-16: 「迁移完有一个弹窗告诉用户，已经迁移完毕了，这个升级没法回滚，不然以前的版本读不到数据」)."""
+    if not os.path.exists(MOVE_NOTICE_FILE):
+        return False
+    try:
+        os.remove(MOVE_NOTICE_FILE)
+    except Exception:
+        pass
+    text = QCoreApplication.translate(
+        'LaunchpadWindow',
+        "Raspberry has moved its data to the folder macOS recommends:\n%1\n\n"
+        "Your groups, the order of your apps and your settings are all there.\n"
+        "This upgrade cannot be undone: an earlier version of Raspberry can no longer read the data.")
+    shown = os.path.join("~/Library/Application Support", BUNDLE_ID)
+    raspberry_ui.raspberry_alert(parent, text.replace('%1', shown),
+                                 QCoreApplication.translate('LaunchpadWindow', "Data moved"))
+    return True
 
 
 class PermissionInfoWidget(QWidget):
     def __init__(self):
         super().__init__()
-        self.radius = 16  # 圆角半径，可按 macOS 15 或 26 设置为 16~26
-
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.Window |
-            Qt.WindowType.WindowStaysOnTopHint
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
-
         self.init_ui()
+        make_native_glass_window(self)   # system traffic lights + window glass (style book 5.7.2)
 
     def init_ui(self):
         self.setUpMainWindow()
         self.setFixedSize(400, 600)
         self.center()
         self.setFocus()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-
-        rect = QRectF(self.rect())
-        path = QPainterPath()
-        path.addRoundedRect(rect, self.radius, self.radius)
-
-        painter.setClipPath(path)
-        bg_color = self.palette().color(QPalette.ColorRole.Window)
-        painter.fillPath(path, bg_color)
-
-    # 让无边框窗口可拖动
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            event.accept()
-
-    def mouseMoveEvent(self, event):
-        if event.buttons() == Qt.MouseButton.LeftButton:
-            self.move(event.globalPosition().toPoint() - self.drag_pos)
-            event.accept()
 
     def setUpMainWindow(self):
         # 添加关闭按钮（仿 macOS 左上角红色圆点）
@@ -7500,9 +8914,6 @@ class PermissionInfoWidget(QWidget):
         #             }
         #         """)
         # self.close_button.clicked.connect(self.close)
-        self.close_button = MacWindowButton("#FF605C", "x", self)
-        self.close_button.move(10, 10)
-        self.close_button.clicked.connect(self.close)
 
         layout = QVBoxLayout()
 
@@ -7582,89 +8993,11 @@ class PermissionInfoWidget(QWidget):
         self.move(qr.topLeft())
 
 
-style_sheet_ori = '''
-	QTabWidget::pane {
-		border: 1px solid #ECECEC;
-		background: #ECECEC;
-		border-radius: 9px;
-}
-	QTableWidget{
-		border: 1px solid grey;  
-		border-radius:4px;
-		background-clip: border;
-		background-color: #FFFFFF;
-		color: #000000;
-		font: 14pt Helvetica;
-}
-	QWidget#Main {
-		border: 1px solid #ECECEC;
-		background: #ECECEC;
-		border-radius: 9px;
-}
-	QPushButton{
-		border: 1px outset grey;
-		background-color: #FFFFFF;
-		border-radius: 4px;
-		padding: 1px;
-		color: #000000
-}
-	QPushButton:pressed{
-		border: 1px outset grey;
-		background-color: #0085FF;
-		border-radius: 4px;
-		padding: 1px;
-		color: #FFFFFF
-}
-	QPlainTextEdit{
-		border: 1px solid grey;  
-		border-radius:4px;
-		padding: 1px 5px 1px 3px; 
-		background-clip: border;
-		background-color: #F3F2EE;
-		color: #000000;
-		font: 14pt Times New Roman;
-}
-	QPlainTextEdit#edit{
-		border: 1px solid grey;  
-		border-radius:4px;
-		padding: 1px 5px 1px 3px; 
-		background-clip: border;
-		background-color: #FFFFFF;
-		color: rgb(113, 113, 113);
-		font: 14pt Helvetica;
-}
-	QTableWidget#small{
-		border: 1px solid grey;  
-		border-radius:4px;
-		background-clip: border;
-		background-color: #F3F2EE;
-		color: #000000;
-		font: 14pt Times New Roman;
-}
-	QLineEdit{
-		border-radius:4px;
-		border: 1px solid gray;
-		background-color: #FFFFFF;
-}
-	QTextEdit{
-		border: 1px grey;  
-		border-radius:4px;
-		padding: 1px 5px 1px 3px; 
-		background-clip: border;
-		background-color: #F3F2EE;
-		color: #000000;
-		font: 14pt;
-}
-	QListWidget{
-		border: 1px grey;  
-		border-radius:4px;
-		padding: 1px 5px 1px 3px; 
-		background-clip: border;
-		background-color: #F3F2EE;
-		color: #000000;
-		font: 14pt;
-}
-'''
+glass_kit.install_glass_button_class(WhiteButton)  # white capsules become glass (before any window is built)
+for _glass_window_cls in (WindowAbout, CustomDialog, CustomDialog2, CustomDialog3, CustomDialog4, WindowUpdate,
+                          PermissionInfoWidget):
+    install_native_glass_window_class(_glass_window_cls)
+
 
 if __name__ == "__main__":
     SINGLETON = "com.ryanthehito.raspberry.singleton"
@@ -7679,21 +9012,49 @@ if __name__ == "__main__":
     if other_instance_running():
         sys.exit(0)
 
-    app = QApplication(sys.argv)
+    app = QApplication.instance() or QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
-    lang_file = Path.home() / ".raspberry_lang"
+    lang_file = Path(LANG_FILE)
     if lang_file.exists():
         lang = lang_file.read_text(encoding="utf-8").strip()
     else:
         lang = "system"  # 默认：跟随系统
     load_translation(app, lang)
 
+    # light / dark, live (style book 5.8)
+    on_theme_changed(raspberry_ui.apply_raspberry_theme)
+    install_theme_observer()
+    raspberry_ui.apply_raspberry_theme()
+
     win = None  # 全局主窗口变量
+    launch = {'by_user': False}     # opened by the user (not at login): the launcher opens once it is ready
 
     # Dock delegate 必须在主线程入口设置
     if sys.platform == "darwin":
         class _DockClickDelegate(NSObject):
+            def applicationDidFinishLaunching_(self, notification):
+                # "Start on login" is a LaunchAgent that runs the program with "autostart": that start has
+                # no login mark, and AppKit then makes up an "open app" event itself (tried 2026-11-23)
+                launch['by_user'] = ('autostart' not in sys.argv[1:] and launched_by_user(
+                    NSAppleEventManager.sharedAppleEventManager().currentAppleEvent()))
+
+            def applicationWillTerminate_(self, notification):
+                # macOS ends the process right after this (app.exec() does not return): a Dock change
+                # under way finishes first, so the Dock is not left hidden; a scan for new apps stops
+                # (one ended in the middle of saving an icon can crash on the way out)
+                try:
+                    worker = getattr(win, 'scan_worker', None)
+                    if worker is not None and worker.isRunning():
+                        worker.stop()
+                        worker.wait(1500)
+                except Exception:
+                    pass
+                stop_assistant_tools()      # the card for the assistant app: no longer running
+                wait_for_dock()
+                # one-click update: the new version is swapped in now (nothing after app.exec() runs)
+                raspberry_apply_pending_update_install()
+
             def applicationShouldHandleReopen_hasVisibleWindows_(self, app, flag):
                 if win is not None:
                     if win.isVisible():
@@ -7728,15 +9089,27 @@ if __name__ == "__main__":
         permission.first_show_window()
         global win
         win = LaunchpadWindow(apps)
-        win.setAutoFillBackground(True)
-        p = win.palette()
-        p.setColor(win.backgroundRole(), QColor('#ECECEC'))
-        win.setPalette(p)
         win.hide()
-        app.setStyleSheet(style_sheet_ori)
+        win.mark_windows_at_birth()     # "Show on all Spaces": before the Dock icon is there
+        show_dock_icon()
+        QTimer.singleShot(600, lambda: announce_data_move(None))
+        QTimer.singleShot(1500, lambda: start_assistant_tools(win))   # for an assistant app, if there is one
+        # started by the user (Dock, Finder, Spotlight): open as soon as it is ready — not at login, and
+        # not over the first-run notice, the data-moved notice, or the note of an update just installed
+        # (the restart after an update is an ordinary start too) (Ryan 2026-11-22)
+        if (launch['by_user'] and not permission.isVisible() and not os.path.exists(MOVE_NOTICE_FILE)
+                and not getattr(win.win_update, '_startup_note', '')):
+            QTimer.singleShot(0, win.show_main_window)
 
     index_worker = AppIndexWorker()
     index_worker.finished.connect(on_index_finished)
+    QTimer.singleShot(20000, show_dock_icon)    # never without an icon for long, whatever the indexing does
     index_worker.start()
     
-    sys.exit(app.exec())
+    # one-click update: drop what the last update left. The version the user chose to install is swapped
+    # in by the delegate's applicationWillTerminate_ (macOS ends the process there); the call after
+    # app.exec() only covers a run without that delegate (it does nothing a second time)
+    threading.Thread(target=raspberry_cleanup_update_leftovers, daemon=True, name='raspberry-update-cleanup').start()
+    exit_code = app.exec()
+    raspberry_apply_pending_update_install()
+    sys.exit(exit_code)

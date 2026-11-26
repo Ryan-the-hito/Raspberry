@@ -12,7 +12,7 @@
 
 **Raspberry is a full-screen app launcher for the Mac: the Launchpad you knew, with your own groups, rebuilt in Liquid Glass.** Click its Dock icon and every app on your Mac is there on the blurred wallpaper; click a group and it opens as a pane of glass. You sort things by right-click, by dragging or from the keyboard, and Raspberry keeps your groups, their order and your pages in plain files on your own Mac.
 
-Latest version: **v0.0.18** · Interface languages: English / 简体中文 / 日本語
+Latest version: **v0.0.19** · Interface languages: English / 简体中文 / 日本語
 
 From v0.0.17 on there is **one Raspberry**. The Free and Pro editions have been merged: everything the Pro edition had (importing your Launchpad groups, backups, languages, aliases, drag sorting) is in the one download.
 
@@ -126,6 +126,16 @@ The focused icon has a ring in the system's accent colour.
 - **🕹 Traditional Mode** (on by default): one click opens, a click on an empty spot closes, as in Launchpad. Off: the double-click mode of the early versions.
 - **🛠️ Start on login**.
 
+### Works with Broccoli and other AI apps
+
+Raspberry offers its functions as a set of 26 tools (MCP), so an AI can manage your apps for you: "put these apps into one group", "hide the apps I never use", "sort the loose apps by name".
+
+- **Tools.** See the app list and the layout of each page, open an app, create / rename / dissolve groups, add apps to a group and take them out, sort inside a group, sort the launcher and move items between pages, hide and restore apps, give an app another name, the switches in the menu, the paging speed, update one icon, back up, rescan apps, move an app to the Trash, open and close the launcher, search, turn pages.
+- **With [Broccoli](https://github.com/Ryan-the-hito/Broccoli) on the same Mac**, the tools attach to Broccoli by themselves; nothing to set up. When Raspberry is not running, it is opened in the background when needed, without showing the launcher.
+- **Other AI apps** (Claude Desktop, Claude Code, Cursor, Codex and so on): click *Actions › 🔌 Use in other AI apps…*. The setup is copied; paste it into that app's MCP settings. Once is enough: the tools of the author's other apps on this Mac (Tomato, Broccoli, Watermelon, Strawberry) come along.
+- **What AI does not get**: restoring a backup, clearing all groups, importing from Launchpad, clearing the icon cache, *Show on all Spaces* and the language. These stay in the menu. Read-only tools are used directly; for tools that change something, the AI app decides whether to ask you first.
+- The service runs on this Mac only (127.0.0.1), with a new password at every start.
+
 ### One-click update
 
 *Info › 🆕 Check for Updates*. Raspberry also checks shortly after it starts and once a day. When there is a new version, it downloads it, checks it, replaces itself and opens again. Your groups and settings stay.
@@ -237,7 +247,7 @@ https://github.com/user-attachments/assets/e783b225-b88b-4d3e-8642-3202b0f5c1cd
    - **Automation**: allow it when macOS asks. Raspberry uses it to hide and show the Dock.
    - **Screen Recording** (optional): Raspberry never asks for it. If it already has it, the blurred background is taken from the wallpaper exactly as it is on the screen, moving wallpapers included; without it, Raspberry reads the wallpaper's picture file.
 5. **Later updates**: *Info › 🆕 Check for Updates* does the rest.
-   - **Coming from v0.0.16 or earlier: install this version by hand once** (download the DMG and replace the app). The one-click update starts with v0.0.17.
+   - **Coming from v0.0.18 or earlier: install this version by hand once** (download the DMG and replace the app). The one-click update in v0.0.18 downloads the new version but cannot swap it in after quitting; it really works from v0.0.19 on.
    - If you had the Free edition: this is now the full Raspberry, with everything the Pro edition had.
    - Your groups are kept. On the first start the data moves to the new folder (see "Your data stays on your Mac"); Raspberry tells you once when it has done so.
 
@@ -254,7 +264,7 @@ https://github.com/user-attachments/assets/e783b225-b88b-4d3e-8642-3202b0f5c1cd
 
 ## How to use
 
-1. **Open and close.** Click Raspberry's icon in the Dock to open the launcher; click it again to close. Esc, ⌘W and a click on an empty spot also close it.
+1. **Open and close.** Click Raspberry's icon in the Dock to open the launcher; click it again to close. Esc, ⌘W and a click on an empty spot also close it. When you start Raspberry yourself, the launcher appears as soon as it is ready; when it starts at login, it stays in the background.
 2. **Open an app or a group.** One click. A group opens as a panel; click outside it, or press Tab, to go back.
 3. **Make a group.** Right-click an app › *Combine into a group* › *🆕 New group*, or drag the app onto "New group" in the list at the side. Right-click the group to rename it.
 4. **Put things in order.** Drag icons and groups, or focus one with the arrow keys and swap it with its neighbour (⌃ / ⌥ / ⌘ + ← / →). *🔤 Sort ungrouped apps alphabetically* does the loose apps in one go.
@@ -272,7 +282,7 @@ https://github.com/user-attachments/assets/e783b225-b88b-4d3e-8642-3202b0f5c1cd
 
 ## Notes
 
-1. Coming from v0.0.16 or earlier, install by hand once; from then on the update is one click.
+1. Coming from v0.0.18 or earlier, install by hand once; from then on the update is one click.
 2. Save your arrangement now and then with *🗂️ Backup current groups*.
 3. *Move to the trash can* moves the app itself to the Trash. *Hide in Raspberry* only stops showing it.
 4. With *🖥 Show on all Spaces* on, Raspberry starts without its Dock icon for a moment and shows it once its windows are ready. That is intended.
@@ -304,6 +314,22 @@ If you like Raspberry, a Star or an Issue helps. Raspberry is free; if you want 
 </p>
 
 ## Versions
+
+### v0.0.19
+
+New:
+
+1. Opens faster: the first opening after starting takes about 0.3 seconds instead of 1–3; Raspberry no longer reads every app's information file at each start; hiding and showing the Dock happens in the background.
+2. When you start Raspberry yourself, the launcher appears as soon as it is ready; when it starts at login, it still stays in the background.
+3. Works with Broccoli and other AI apps: 26 tools (MCP) for the app list, groups, order, pages, hidden apps, names, switches, backups. They attach to Broccoli by themselves; for other AI apps, *Actions › 🔌 Use in other AI apps…* copies the setup.
+
+Fixed:
+
+1. With Stage Manager on, the system squeezed the launcher into the space beside its strip; it now always covers the whole screen.
+2. The one-click update did not swap in the new version after quitting (v0.0.18). Coming from v0.0.18, install by hand once.
+3. After an update, the reopened launcher covered the "Updated" note.
+4. The first opening briefly created dozens of invisible little windows, which made it slow.
+5. Reading icons in the background occasionally failed and could make Raspberry quit; quitting during an icon scan occasionally caused an error.
 
 ### v0.0.18
 

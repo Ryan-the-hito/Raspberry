@@ -3,9 +3,9 @@
 
 block_cipher = None
 
-# Last synced from the source folder 2026-11-26: Raspberry/pro/Raspberry_v0.0.19new4 (+ glass_kit.py,
+# Last synced from the source folder 2026-11-27: Raspberry/pro/Raspberry_v0.0.20.py (+ glass_kit.py,
 # raspberry_ui.py, smooth_widgets.py, app_mcp_host.py, raspberry_mcp.py, i18n/*.qm).
-# Replaced files: ~/Downloads/Raspberrynew_backup_20261126.
+# Replaced files: ~/Downloads/Raspberrynew_backup_20261127.
 
 # The version comes from Raspberry.py's VERSION (same folder): the one-click update compares the
 # installed app's version with the release, so the two must never differ.

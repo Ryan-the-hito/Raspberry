@@ -171,7 +171,7 @@ ALIAS_NAME_MAP_FILE = data_path('alias_names.json')
 LANG_FILE = setting_path('lang')
 HIDDEN_APPS_FILE = data_path('hidden_apps.json')
 PAGES_FILE = data_path('pages.json')      # with separate pages: which page each icon is on
-VERSION = "0.0.19"
+VERSION = "0.0.20"
 NAME = 'Raspberry'      # one Raspberry now: no "Pro" in any name (Ryan 2026-11-18)
 
 os.environ["QT_QUICK_BACKEND"] = "metal"
@@ -3998,9 +3998,8 @@ class LaunchpadWindow(QWidget):
         # a Dock that is showing: the content keeps clear of it (Ryan 2026-11-16)
         self._dock_insets = (0, 0, 0)
         for _screen in QGuiApplication.screens():
-            _screen.availableGeometryChanged.connect(self._on_available_geometry_changed)
-        QGuiApplication.instance().screenAdded.connect(
-            lambda screen: screen.availableGeometryChanged.connect(self._on_available_geometry_changed))
+            self._watch_screen(_screen)
+        QGuiApplication.instance().screenAdded.connect(self._watch_screen)
         # the wallpaper of the screen the mouse is on is fetched now, in the background: the first opening
         # of the launcher does not wait for it
         _start_screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
@@ -4542,6 +4541,7 @@ class LaunchpadWindow(QWidget):
         panel = self.group_widget
         if panel is None or not panel.isVisible() or getattr(self, '_closing', False):
             return
+        self._sync_scrim()
         room = self.group_available_rect().size()
         fit = group_panel_fit(room.width(), room.height(), len(panel.group['apps']), cell_size())
         centred = self.group_panel_rect(panel)
@@ -4678,6 +4678,58 @@ class LaunchpadWindow(QWidget):
 
     def _on_available_geometry_changed(self, *_args):
         QTimer.singleShot(0, self._recheck_dock)
+
+    def _watch_screen(self, screen):
+        screen.availableGeometryChanged.connect(self._on_available_geometry_changed)
+        # another resolution while the launcher is up (Ryan 2026-11-27): followed at once, not at the next opening
+        screen.geometryChanged.connect(lambda *_args, screen=screen: QTimer.singleShot(
+            0, lambda: self._follow_screen_size() if self.isVisible() and self.screen() is screen else None))
+
+    def _follow_screen_size(self, geometry=None) -> bool:
+        """The launcher is up and its screen has another size now: the window, the wallpaper, the icons and
+        an open group with its dimmed background all go to the new size. True = something was changed."""
+        if not self.isVisible():
+            return False
+        if geometry is None:
+            screen = self.screen() or QGuiApplication.primaryScreen()
+            geometry = screen.geometry()
+        if QRect(geometry) == self.geometry():
+            return False
+        self._show_serial = getattr(self, '_show_serial', 0) + 1     # the check after showing looked at the old size
+        self.setGeometry(QRect(geometry))
+        self.main_content.setGeometry(self.rect())
+        self.backdrop.prepare(self.geometry())
+        self.apply_dock_insets()
+        self._finish_reflow()
+        self.fit_cells()
+        self.display_apps(self.filtered_apps, self.current_page)
+        self._refit_open_group()
+        return True
+
+    def _sync_scrim(self) -> bool:
+        """The dimmed, blurred layer behind an open group covers the whole window at the size it has now
+        (it used to be measured only when the group opened: after another resolution it kept the old
+        size and the old picture). True = it was resized."""
+        scrim = getattr(self, 'scrim', None)
+        if scrim is None or not scrim.isVisible() or scrim.geometry() == self.rect():
+            return False
+        scrim.setGeometry(self.rect())
+        return True
+
+    def _refit_open_group(self):
+        """An open group after the window changed its size: the layer behind it, the panel and the
+        blurred picture, now (not queued: nothing of the old size is seen)."""
+        panel = self.group_widget
+        if panel is None or not panel.isVisible():
+            return
+        self._sync_scrim()
+        self.refit_group_panel()
+        self._refresh_group_glass()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._sync_scrim():
+            QTimer.singleShot(0, self._refresh_group_glass)     # its picture, once the layout has settled
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -6165,8 +6217,13 @@ class LaunchpadWindow(QWidget):
             self.apply_dock_insets((0, 0, 0))
         for _delay in (350, 900, 1800):
             QTimer.singleShot(_delay, self._recheck_dock)
+        _size_before = self.size()
         rendered = self.adapt_to_screen()  # 每次 show 都刷新几何
-        raspberry_ui.keep_out_of_stage_manager(self)
+        # the Stage Manager mark: with the marks from the start it is already on (mark_windows_at_birth);
+        # touching the window's marks now, with the Dock icon there, would take the launcher off other
+        # apps' full-screen Spaces (tried on the real screen 2026-11-26: only the normal desktop was left)
+        if not self._spaces_marks_from_birth:
+            raspberry_ui.keep_out_of_stage_manager(self)
         # … and once it is up: still covering the screen it was put on? (put back once, nothing is fought over)
         self._show_serial = getattr(self, '_show_serial', 0) + 1
         QTimer.singleShot(self.SHOW_LANDING_CHECK_MS, lambda serial=self._show_serial, wanted=QRect(self.geometry()): self._check_show_landing(serial, wanted))
@@ -6174,6 +6231,10 @@ class LaunchpadWindow(QWidget):
         self.menu_bar_cover.start()             # over the menu bar until this window is hidden
         if not rendered:
             self.display_apps(self.filtered_apps, self.current_page)
+        if self.size() != _size_before:
+            # the screen has another size than at the last opening and a group was left open: it is
+            # fitted here, before the window is on the screen (it used to be queued → the old look showed)
+            self._refit_open_group()
         self.prepare_icons_for_animation()
         if getattr(self, '_force_show_dock', False):
             self.show_dock()
@@ -7289,6 +7350,7 @@ class LaunchpadWindow(QWidget):
         if not self._show_on_all_spaces or dock_icon_shown():
             return False
         done = self.apply_show_on_all_spaces()
+        raspberry_ui.keep_out_of_stage_manager(self)     # now, not at each show (see showEvent)
         for name in ('win_update', 'win_about', 'win_permission'):
             window = getattr(self, name, None)
             if window is not None:

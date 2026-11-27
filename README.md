@@ -8,11 +8,11 @@
 
 <p align="center"><a href="https://t.me/+AODLypeF_aYwYjNh">Telegram</a> | <a href="https://twitter.com/ryanswindows">Twitter</a> | <a href="https://weibo.com/ryanthehitos">Weibo</a></p>
 
-<p align="center"><a href="https://github.com/Ryan-the-hito/Raspberry/releases/latest/download/Raspberry.dmg"><b>Download the latest version</b></a></p>
+<p align="center"><a href="https://github.com/Ryan-the-hito/Raspberry/releases/latest"><b>Download the latest version</b></a></p>
 
 **Raspberry is a full-screen app launcher for the Mac: the Launchpad you knew, with your own groups, rebuilt in Liquid Glass.** Click its Dock icon and every app on your Mac is there on the blurred wallpaper; click a group and it opens as a pane of glass. You sort things by right-click, by dragging or from the keyboard, and Raspberry keeps your groups, their order and your pages in plain files on your own Mac.
 
-Latest version: **v0.0.19** · Interface languages: English / 简体中文 / 日本語
+Latest version: **v0.0.20** · Interface languages: English / 简体中文 / 日本語
 
 From v0.0.17 on there is **one Raspberry**. The Free and Pro editions have been merged: everything the Pro edition had (importing your Launchpad groups, backups, languages, aliases, drag sorting) is in the one download.
 
@@ -240,7 +240,7 @@ https://github.com/user-attachments/assets/e783b225-b88b-4d3e-8642-3202b0f5c1cd
 
 ## Download and install
 
-1. Download the latest `Raspberry.dmg` from [Releases](https://github.com/Ryan-the-hito/Raspberry/releases).
+1. Open the [latest release](https://github.com/Ryan-the-hito/Raspberry/releases/latest) and download the `.dmg` file under *Assets* (for example `Raspberry_v0.0.20.1.dmg`).
 2. Open the DMG and drag Raspberry into the Applications folder.
 3. Open Raspberry. On the first start it indexes your apps and their icons; this can take up to a few minutes. Please wait and do not quit it. It does not happen again afterwards.
 4. Permissions, in *System Settings › Privacy & Security*:
@@ -314,6 +314,17 @@ If you like Raspberry, a Star or an Issue helps. Raspberry is free; if you want 
 </p>
 
 ## Versions
+
+### v0.0.20
+
+Fixed:
+
+1. With *Show on all Spaces* on, Raspberry could not open over another app's full-screen Space (v0.0.19 only).
+2. After a change of screen resolution, the dimmed background behind an open group kept its old size; it now follows the new size, and the old picture no longer flashes up.
+
+Improved:
+
+1. Change the resolution while the launcher is up and it follows at once (window, wallpaper, icon size, open group).
 
 ### v0.0.19
 

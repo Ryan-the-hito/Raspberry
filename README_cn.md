@@ -8,11 +8,11 @@
 
 <p align="center"><a href="https://t.me/+AODLypeF_aYwYjNh">Telegram</a> | <a href="https://twitter.com/ryanswindows">Twitter</a> | <a href="https://weibo.com/ryanthehitos">Weibo</a></p>
 
-<p align="center"><a href="https://github.com/Ryan-the-hito/Raspberry/releases/latest/download/Raspberry.dmg"><b>下载最新版</b></a></p>
+<p align="center"><a href="https://github.com/Ryan-the-hito/Raspberry/releases/latest"><b>下载最新版</b></a></p>
 
 **Raspberry 是 Mac 上的全屏应用启动器：你熟悉的那个启动台，带着你自己的分组，用液态玻璃重新做了一遍。** 点一下程序坞里的图标，这台 Mac 上的所有应用就铺在模糊的壁纸上；点一个分组，它像一块玻璃一样展开。整理可以用右键、可以拖动、也可以全程用键盘。分组、顺序和分页都存成普通文件，放在你自己的 Mac 上。
 
-最新版本：**v0.0.19** · 界面语言：English / 简体中文 / 日本語
+最新版本：**v0.0.20** · 界面语言：English / 简体中文 / 日本語
 
 从 v0.0.17 起，**Raspberry 只有一个版本**。免费版和 Pro 版合并了：原来 Pro 版才有的功能（导入启动台分组、备份、多语言、自定义名称、拖动排序）现在都在这一个下载里。
 
@@ -240,7 +240,7 @@ https://github.com/user-attachments/assets/e783b225-b88b-4d3e-8642-3202b0f5c1cd
 
 ## 下载安装
 
-1. 从 [Releases](https://github.com/Ryan-the-hito/Raspberry/releases) 下载最新的 `Raspberry.dmg`。
+1. 打开[最新版的发布页](https://github.com/Ryan-the-hito/Raspberry/releases/latest)，在 *Assets* 下面下载 `.dmg` 文件（比如 `Raspberry_v0.0.20.1.dmg`）。
 2. 打开 DMG，把 Raspberry 拖进"应用程序"文件夹。
 3. 打开 Raspberry。第一次启动时它要索引你的应用和图标，最长可能要几分钟。请耐心等待，不要退出。之后不会再有这一步。
 4. 权限，在「系统设置 › 隐私与安全性」里：
@@ -314,6 +314,17 @@ GPL-3.0，详见 LICENSE 文件。
 </p>
 
 ## 版本历史
+
+### v0.0.20
+
+修复：
+
+1. 「在所有桌面显示」开着时，进不了别的应用的全屏桌面（只有 v0.0.19 有这个问题）。
+2. 换了屏幕分辨率之后，打开的分组后面那层变暗的背景还是旧的大小；现在跟着新尺寸走，也不会先闪一下旧画面。
+
+改进：
+
+1. 主界面开着时换分辨率，立刻适应（窗口、壁纸、图标大小、开着的分组）。
 
 ### v0.0.19
 
